@@ -1,0 +1,18 @@
+# Dependencies
+vendor/
+third_party/
+
+# Build outputs
+bin/
+dist/
+
+# Coverage
+coverage.html
+coverage.out
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

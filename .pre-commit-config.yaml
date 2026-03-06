@@ -1,0 +1,24 @@
+repos:
+  # Go 项目常用检查
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+
+  - repo: https://github.com/QimaoTech/pre-commit-golang
+    rev: v1.0.0-rc.5
+    hooks:
+      # test no vet
+      - id: go-test-no-vet-repo-mod
+      # golangci-lint staged 的检查，只检查新增代码
+      - id: golangci-lint-new-only-repo-mod
+      # go mod tidy
+      - id: go-mod-tidy-repo
+      # no work 构建检查
+      - id: go-build-repo-mod-no-work

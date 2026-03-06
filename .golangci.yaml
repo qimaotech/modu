@@ -1,0 +1,179 @@
+version: "2"
+run:
+  go: "1.24"
+  build-tags:
+    - musl
+  modules-download-mode: readonly
+  issues-exit-code: 0
+  tests: false
+linters:
+  enable:
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - contextcheck
+    - depguard
+    - durationcheck
+    - err113
+    - errchkjson
+    - errorlint
+    - exhaustive
+    - fatcontext
+    - gocheckcompilerdirectives
+    - gochecksumtype
+    - gomodguard
+    - gosec
+    - loggercheck
+    - makezero
+    - musttag
+    - nilerr
+    - nilnesserr
+    - noctx
+    - perfsprint
+    - prealloc
+    - protogetter
+    - reassign
+    - recvcheck
+    - spancheck
+    - sqlclosecheck
+    - testifylint
+    - unparam
+    - wrapcheck
+    - zerologlint
+  disable:
+    - gosmopolitan
+    - rowserrcheck
+    - tagalign
+  settings:
+    cyclop:
+      max-complexity: 10
+    depguard:
+      rules:
+        main:
+          files:
+            - "!**/*_a _file.go"
+          allow:
+            - $gostd
+            - github.com
+            - modu
+            - gopkg.in
+            - golang.org/x
+            - codeup.aliyun.com/qimao/public/devops/modu
+    dogsled:
+      max-blank-identifiers: 2
+    dupl:
+      threshold: 100
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+    funlen:
+      lines: 60
+      statements: 40
+    gocognit:
+      min-complexity: 20
+    goconst:
+      match-constant: true
+      min-len: 3
+      min-occurrences: 3
+      ignore-calls: true
+    gocyclo:
+      min-complexity: 10
+    gomoddirectives:
+      replace-local: false
+    gosec:
+      excludes:
+        - G401
+        - G501
+    govet:
+      enable:
+        - atomicalign
+      disable:
+        - shadow
+      enable-all: false
+      disable-all: false
+      settings:
+        printf:
+          funcs:
+            - (github.com/golangci/golangci-lint/pkg/logutils.Log).Infof
+            - (github.com/golangci/golangci-lint/pkg/logutils.Log).Warnf
+            - (github.com/golangci/golangci-lint/pkg/logutils.Log).Errorf
+            - (github.com/golangci/golangci-lint/pkg/logutils.Log).Fatalf
+    lll:
+      line-length: 500
+    nakedret:
+      max-func-lines: 50
+    nestif:
+      min-complexity: 4
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: false
+    predeclared:
+      qualified-name: false
+    rowserrcheck:
+      packages:
+        - github.com/jmoiron/sqlx
+    staticcheck:
+      checks:
+        - all
+        - -ST1000
+        - -ST1020
+        - -ST1021
+        - -ST1022
+    tagliatelle:
+      case:
+        rules:
+          avro: snake
+          bson: snake
+          json: snake
+          mapstructure: snake
+          xml: snake
+          yaml: snake
+        use-field-name: true
+    testpackage:
+      skip-regexp: (export|internal)_test\.go
+    whitespace:
+      multi-if: false
+      multi-func: false
+    wrapcheck:
+      ignore-package-globs:
+        - encoding/*
+        - github.com/pkg/*
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - errcheck
+          - gocyclo
+          - gosec
+          - lll
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  fix: false
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofumpt:
+      extra-rules: true
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

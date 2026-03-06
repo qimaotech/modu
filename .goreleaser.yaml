@@ -1,0 +1,75 @@
+# .goreleaser.yaml
+# GoReleaser 配置文件
+# 支持 Darwin/Linux arm64/amd64 交叉编译
+
+project_name: modu
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: modu
+    dir: ./cmd/modu
+    main: .
+    binary: modu
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: default
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - .modu.yaml  # 示例配置
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  name_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+release:
+  github:
+    owner: qimao
+    name: modu
+  name_template: '{{ .Tag }}'
+  draft: false
+
+brew:
+  github:
+    owner: qimao
+    name: homebrew-modu
+  tap:
+    owner: qimao
+    name: homebrew-modu
+  folder: Formula
+  name: modu
+
+# Docker 支持（可选）
+# docker:
+#   - image_templates:
+#       - qimao/modu:{{ .Tag }}
+#       - qimao/modu:latest
