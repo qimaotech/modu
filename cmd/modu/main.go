@@ -265,6 +265,19 @@ func runConfigCreate(cmd *cobra.Command, args []string) {
 		return
 	}
 
+	// scan 模式下检查配置文件是否已存在
+	if scan {
+		if _, err := os.Stat(configPath); err == nil {
+			fmt.Printf("配置文件 %s 已存在，是否覆盖? (y/N): ", configPath)
+			var confirm string
+			fmt.Scanln(&confirm)
+			if confirm != "y" && confirm != "Y" {
+				fmt.Println("已取消")
+				os.Exit(0)
+			}
+		}
+	}
+
 	// 非交互式模式：使用命令行参数或默认值创建配置
 	workspace, _ := cmd.Flags().GetString("workspace")
 	worktreeRoot, _ := cmd.Flags().GetString("worktree-root")
