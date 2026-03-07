@@ -106,6 +106,7 @@ func main() {
 	initCmd.Flags().String("worktree-root", "./worktrees", "Worktree 存放目录")
 	initCmd.Flags().String("default-base", "develop", "默认基准分支")
 	initCmd.Flags().StringArray("module", []string{}, "模块 (格式: name=url)")
+	initCmd.Flags().BoolP("scan", "s", false, "扫描 workspace 目录自动发现模块")
 
 	// initrepo 命令 - 仓库初始化（克隆）
 	initRepoCmd := &cobra.Command{
@@ -322,8 +323,10 @@ func runStatus(cmd *cobra.Command, args []string) {
 
 // runInitConfig 运行配置初始化向导
 func runInitConfig(cmd *cobra.Command, args []string) {
-	// 检查是否可以使用 TTY
-	if isInteractiveTerminal() {
+	scan, _ := cmd.Flags().GetBool("scan")
+
+	// 检查是否可以使用 TTY（只有在非 scan 模式时）
+	if isInteractiveTerminal() && !scan {
 		if err := ui.RunConfigWizard(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -359,10 +362,78 @@ func runInitConfig(cmd *cobra.Command, args []string) {
 		}
 	}
 
+	// 如果是 scan 模式
+	if scan {
+		runInitConfigWithScan(cmd, cfg)
+		return
+	}
+
 	if err := config.SaveConfig(cfg, configPath); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
 	fmt.Printf("配置文件已创建: %s\n", configPath)
+}
+
+// runInitConfigWithScan 创建配置后扫描 workspace 自动发现模块
+func runInitConfigWithScan(cmd *cobra.Command, cfg *config.Config) {
+	// 先保存初始配置
+	if err := config.SaveConfig(cfg, configPath); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("配置文件已创建: %s\n", configPath)
+
+	// 检查 workspace 是否存在
+	workspaceExists := true
+	if _, err := os.Stat(cfg.Workspace); os.IsNotExist(err) {
+		workspaceExists = false
+	}
+
+	// 如果 workspace 不存在，先克隆仓库
+	if !workspaceExists {
+		fmt.Println("workspace 目录不存在，先克隆仓库...")
+		eng := engine.New(cfg)
+		if err := eng.Init(cmd.Context()); err != nil {
+			fmt.Fprintf(os.Stderr, "克隆仓库失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("✓ 仓库克隆完成")
+	}
+
+	// 扫描 workspace
+	newModules, err := config.ScanWorkspace(cmd.Context(), cfg.Workspace)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "扫描 workspace 失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(newModules) == 0 {
+		fmt.Println("未发现新的 git 仓库")
+		return
+	}
+
+	// 合并模块（按 URL 去重）
+	existingURLs := make(map[string]bool)
+	for _, m := range cfg.Modules {
+		existingURLs[m.URL] = true
+	}
+
+	addedCount := 0
+	for _, m := range newModules {
+		if !existingURLs[m.URL] {
+			cfg.Modules = append(cfg.Modules, m)
+			existingURLs[m.URL] = true
+			addedCount++
+		}
+	}
+
+	// 保存配置
+	if err := config.SaveConfig(cfg, configPath); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("✓ 已扫描并添加 %d 个模块\n", addedCount)
 }
