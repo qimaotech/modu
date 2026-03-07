@@ -110,8 +110,15 @@ func main() {
 	configCreateCmd.Flags().String("worktree-root", "./worktrees", "Worktree 存放目录")
 	configCreateCmd.Flags().String("default-base", "develop", "默认基准分支")
 	configCreateCmd.Flags().StringArray("module", []string{}, "模块 (格式: name=url)")
-	configCreateCmd.Flags().BoolP("scan", "s", false, "扫描当前目录自动发现模块")
 	configCmd.AddCommand(configCreateCmd)
+
+	// config scan 命令 - 扫描当前目录发现模块并更新配置
+	configScanCmd := &cobra.Command{
+		Use:   "scan",
+		Short: "扫描当前目录自动发现模块",
+		Run:   runConfigScan,
+	}
+	configCmd.AddCommand(configScanCmd)
 
 	// init 命令 - 初始化仓库（克隆所有配置的仓库）
 	initCmd := &cobra.Command{
@@ -254,28 +261,13 @@ func runStatus(cmd *cobra.Command, args []string) {
 
 // runConfigCreate 运行配置创建命令
 func runConfigCreate(cmd *cobra.Command, args []string) {
-	scan, _ := cmd.Flags().GetBool("scan")
-
-	// 检查是否可以使用 TTY（只有在非 scan 模式时）
-	if isInteractiveTerminal() && !scan {
+	// 检查是否可以使用 TTY
+	if isInteractiveTerminal() {
 		if err := ui.RunConfigWizard(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		return
-	}
-
-	// scan 模式下检查配置文件是否已存在
-	if scan {
-		if _, err := os.Stat(configPath); err == nil {
-			fmt.Printf("配置文件 %s 已存在，是否覆盖? (y/N): ", configPath)
-			var confirm string
-			fmt.Scanln(&confirm)
-			if confirm != "y" && confirm != "Y" {
-				fmt.Println("已取消")
-				os.Exit(0)
-			}
-		}
 	}
 
 	// 非交互式模式：使用命令行参数或默认值创建配置
@@ -306,12 +298,6 @@ func runConfigCreate(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// 如果是 scan 模式，扫描当前目录
-	if scan {
-		runConfigCreateWithScan(cmd, cfg)
-		return
-	}
-
 	if err := config.SaveConfig(cfg, configPath); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -320,14 +306,20 @@ func runConfigCreate(cmd *cobra.Command, args []string) {
 	fmt.Printf("配置文件已创建: %s\n", configPath)
 }
 
-// runConfigCreateWithScan 创建配置后扫描当前目录自动发现模块
-func runConfigCreateWithScan(cmd *cobra.Command, cfg *config.Config) {
-	// 先保存初始配置
-	if err := config.SaveConfig(cfg, configPath); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+// runConfigScan 扫描当前目录自动发现模块并更新配置
+func runConfigScan(cmd *cobra.Command, args []string) {
+	// 检查配置文件是否存在
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		fmt.Printf("配置文件 %s 不存在，请先运行 modu config create\n", configPath)
 		os.Exit(1)
 	}
-	fmt.Printf("配置文件已创建: %s\n", configPath)
+
+	// 加载现有配置
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
+		os.Exit(1)
+	}
 
 	// 扫描当前目录
 	currentDir, err := os.Getwd()
