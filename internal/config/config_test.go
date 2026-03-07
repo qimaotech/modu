@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -332,5 +333,83 @@ modules:
 	// 验证配置加载成功
 	if cfg.Workspace != "/opt/workspace" {
 		t.Errorf("expected workspace /opt/workspace, got %s", cfg.Workspace)
+	}
+}
+
+// TestScanWorkspace 测试扫描 workspace 目录
+func TestScanWorkspace(t *testing.T) {
+	tmpDir := t.TempDir()
+	workspaceDir := filepath.Join(tmpDir, "workspace")
+	os.MkdirAll(workspaceDir, 0755)
+
+	// 创建测试 git 仓库
+	testCases := []struct {
+		name     string
+		url      string
+		wantName string
+	}{
+		{name: "module-a", url: "git@github.com:example/module-a.git", wantName: "module-a"},
+		{name: "module-b", url: "git@github.com:example/module-b.git", wantName: "module-b"},
+	}
+
+	for _, tc := range testCases {
+		moduleDir := filepath.Join(workspaceDir, tc.name)
+		os.MkdirAll(moduleDir, 0755)
+
+		// 初始化 git 仓库
+		gitDir := filepath.Join(moduleDir, ".git")
+		os.MkdirAll(gitDir, 0755)
+
+		// 创建 git config 文件
+		configContent := `[core]
+	repositoryformatversion = 0
+[remote "origin"]
+	url = ` + tc.url + `
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "main"]
+	remote = origin
+	merge = refs/heads/main
+`
+		os.WriteFile(filepath.Join(gitDir, "config"), []byte(configContent), 0644)
+	}
+
+	// 创建非 git 目录（应该被忽略）
+	nonGitDir := filepath.Join(workspaceDir, "not-a-repo")
+	os.MkdirAll(nonGitDir, 0755)
+
+	// 执行扫描
+	modules, err := ScanWorkspace(context.Background(), workspaceDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 验证结果
+	if len(modules) != 2 {
+		t.Errorf("expected 2 modules, got %d", len(modules))
+	}
+
+	// 验证模块名称和 URL
+	found := make(map[string]string)
+	for _, m := range modules {
+		found[m.Name] = m.URL
+	}
+
+	for _, tc := range testCases {
+		url, ok := found[tc.wantName]
+		if !ok {
+			t.Errorf("expected to find module %s", tc.wantName)
+			continue
+		}
+		if url != tc.url {
+			t.Errorf("expected URL %s, got %s", tc.url, url)
+		}
+	}
+}
+
+// TestScanWorkspace_NotExist 测试 workspace 不存在
+func TestScanWorkspace_NotExist(t *testing.T) {
+	_, err := ScanWorkspace(context.Background(), "/path/that/does/not/exist")
+	if err == nil {
+		t.Error("expected error for non-existent workspace")
 	}
 }

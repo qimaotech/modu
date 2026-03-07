@@ -1,11 +1,13 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	errs "codeup.aliyun.com/qimao/public/devops/modu/internal/errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -116,4 +118,84 @@ func SaveConfig(cfg *Config, path string) error {
 	}
 
 	return nil
+}
+
+// ScanWorkspace 扫描 workspace 目录，返回所有 git 仓库模块
+func ScanWorkspace(ctx context.Context, workspacePath string) ([]Module, error) {
+	absPath, err := filepath.Abs(workspacePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve workspace path: %w", err)
+	}
+
+	// 检查目录是否存在
+	if _, err := os.Stat(absPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("workspace directory does not exist: %s", absPath)
+	}
+
+	// 读取目录
+	entries, err := os.ReadDir(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read workspace directory: %w", err)
+	}
+
+	var modules []Module
+	for _, entry := range entries {
+		// 只处理目录
+		if !entry.IsDir() {
+			continue
+		}
+
+		modulePath := filepath.Join(absPath, entry.Name())
+
+		// 检查是否为 git 仓库（存在 .git 目录或 .git 文件）
+		gitDir := filepath.Join(modulePath, ".git")
+		if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+			continue
+		}
+
+		// 读取 git config 获取 origin URL
+		gitConfigPath := filepath.Join(gitDir, "config")
+		url, err := readGitRemoteURL(gitConfigPath)
+		if err != nil {
+			// 跳过无法读取 URL 的仓库
+			continue
+		}
+
+		modules = append(modules, Module{
+			Name: entry.Name(),
+			URL:  url,
+		})
+	}
+
+	return modules, nil
+}
+
+// readGitRemoteURL 读取 .git/config 文件获取 origin remote URL
+func readGitRemoteURL(gitConfigPath string) (string, error) {
+	data, err := os.ReadFile(gitConfigPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read git config: %w", err)
+	}
+
+	// 简单解析 [remote "origin"] 下的 url
+	content := string(data)
+	lines := strings.Split(content, "\n")
+
+	inOrigin := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// 检测 [remote "origin"]
+		if strings.HasPrefix(line, "[") {
+			inOrigin = strings.Contains(line, `remote "origin"`)
+			continue
+		}
+
+		// 在 origin 块中查找 url
+		if inOrigin && strings.HasPrefix(line, "url = ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "url = ")), nil
+		}
+	}
+
+	return "", fmt.Errorf("remote origin not found")
 }

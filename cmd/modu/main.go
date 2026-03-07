@@ -113,6 +113,7 @@ func main() {
 		Short: "初始化仓库（克隆所有配置的仓库）",
 		Run:   runInit,
 	}
+	initRepoCmd.Flags().BoolP("scan", "s", false, "扫描 workspace 目录自动发现模块")
 
 	// status 命令
 	statusCmd := &cobra.Command{
@@ -221,6 +222,15 @@ func runInfo(cmd *cobra.Command, args []string) {
 }
 
 func runInit(cmd *cobra.Command, args []string) {
+	scan, _ := cmd.Flags().GetBool("scan")
+
+	// 如果是 scan 模式
+	if scan {
+		runInitWithScan(cmd)
+		return
+	}
+
+	// 普通模式：直接初始化仓库
 	eng := loadConfig()
 	formatter := output.New(outputFmt)
 
@@ -231,6 +241,70 @@ func runInit(cmd *cobra.Command, args []string) {
 	}
 
 	fmt.Println("✓ Initialized all repositories")
+}
+
+// runInitWithScan 扫描 workspace 目录自动发现模块
+func runInitWithScan(cmd *cobra.Command) {
+	formatter := output.New(outputFmt)
+
+	// 先加载配置
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		fmt.Print(formatter.FormatError("ERR_CONFIG_LOAD_FAILED", err.Error(), nil))
+		os.Exit(1)
+	}
+
+	// 检查 workspace 是否存在
+	workspaceExists := true
+	if _, err := os.Stat(cfg.Workspace); os.IsNotExist(err) {
+		workspaceExists = false
+	}
+
+	// 如果 workspace 不存在，先克隆仓库
+	if !workspaceExists {
+		fmt.Println("workspace 目录不存在，先克隆仓库...")
+		eng := engine.New(cfg)
+		if err := eng.Init(cmd.Context()); err != nil {
+			fmt.Print(formatter.FormatError("ERR_INIT_FAILED", err.Error(), nil))
+			os.Exit(1)
+		}
+		fmt.Println("✓ 仓库克隆完成")
+	}
+
+	// 扫描 workspace
+	newModules, err := config.ScanWorkspace(cmd.Context(), cfg.Workspace)
+	if err != nil {
+		fmt.Print(formatter.FormatError("ERR_SCAN_FAILED", err.Error(), nil))
+		os.Exit(1)
+	}
+
+	if len(newModules) == 0 {
+		fmt.Println("未发现新的 git 仓库")
+		return
+	}
+
+	// 合并模块（按 URL 去重）
+	existingURLs := make(map[string]bool)
+	for _, m := range cfg.Modules {
+		existingURLs[m.URL] = true
+	}
+
+	addedCount := 0
+	for _, m := range newModules {
+		if !existingURLs[m.URL] {
+			cfg.Modules = append(cfg.Modules, m)
+			existingURLs[m.URL] = true
+			addedCount++
+		}
+	}
+
+	// 保存配置
+	if err := config.SaveConfig(cfg, configPath); err != nil {
+		fmt.Print(formatter.FormatError("ERR_CONFIG_SAVE_FAILED", err.Error(), nil))
+		os.Exit(1)
+	}
+
+	fmt.Printf("✓ 已扫描并添加 %d 个模块\n", addedCount)
 }
 
 func runStatus(cmd *cobra.Command, args []string) {

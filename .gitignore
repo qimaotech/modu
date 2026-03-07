@@ -21,6 +21,9 @@ Thumbs.db
 
 docs/temp/
 
+# Worktrees
+.worktrees/
+
 # Go
 *.test
 dist/
