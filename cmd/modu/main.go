@@ -96,25 +96,29 @@ func main() {
 		Run:   runInfo,
 	}
 
-	// init 命令 - 配置初始化
+	// config 命令 - 配置管理
+	configCmd := &cobra.Command{
+		Use:   "config",
+		Short: "配置管理",
+	}
+	configCreateCmd := &cobra.Command{
+		Use:   "create",
+		Short: "创建配置文件",
+		Run:   runConfigCreate,
+	}
+	configCreateCmd.Flags().String("workspace", "./workspace", "仓库目录")
+	configCreateCmd.Flags().String("worktree-root", "./worktrees", "Worktree 存放目录")
+	configCreateCmd.Flags().String("default-base", "develop", "默认基准分支")
+	configCreateCmd.Flags().StringArray("module", []string{}, "模块 (格式: name=url)")
+	configCreateCmd.Flags().BoolP("scan", "s", false, "扫描当前目录自动发现模块")
+	configCmd.AddCommand(configCreateCmd)
+
+	// init 命令 - 初始化仓库（克隆所有配置的仓库）
 	initCmd := &cobra.Command{
 		Use:   "init",
-		Short: "初始化/创建配置文件",
-		Run:   runInitConfig,
-	}
-	initCmd.Flags().String("workspace", "./workspace", "仓库目录")
-	initCmd.Flags().String("worktree-root", "./worktrees", "Worktree 存放目录")
-	initCmd.Flags().String("default-base", "develop", "默认基准分支")
-	initCmd.Flags().StringArray("module", []string{}, "模块 (格式: name=url)")
-	initCmd.Flags().BoolP("scan", "s", false, "扫描 workspace 目录自动发现模块")
-
-	// initrepo 命令 - 仓库初始化（克隆）
-	initRepoCmd := &cobra.Command{
-		Use:   "initrepo",
 		Short: "初始化仓库（克隆所有配置的仓库）",
 		Run:   runInit,
 	}
-	initRepoCmd.Flags().BoolP("scan", "s", false, "扫描 workspace 目录自动发现模块")
 
 	// status 命令
 	statusCmd := &cobra.Command{
@@ -145,7 +149,7 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(createCmd, deleteCmd, listCmd, infoCmd, initCmd, initRepoCmd, statusCmd, tuiCmd)
+	rootCmd.AddCommand(createCmd, deleteCmd, listCmd, infoCmd, configCmd, initCmd, statusCmd, tuiCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -223,15 +227,6 @@ func runInfo(cmd *cobra.Command, args []string) {
 }
 
 func runInit(cmd *cobra.Command, args []string) {
-	scan, _ := cmd.Flags().GetBool("scan")
-
-	// 如果是 scan 模式
-	if scan {
-		runInitWithScan(cmd)
-		return
-	}
-
-	// 普通模式：直接初始化仓库
 	eng := loadConfig()
 	formatter := output.New(outputFmt)
 
@@ -242,70 +237,6 @@ func runInit(cmd *cobra.Command, args []string) {
 	}
 
 	fmt.Println("✓ Initialized all repositories")
-}
-
-// runInitWithScan 扫描 workspace 目录自动发现模块
-func runInitWithScan(cmd *cobra.Command) {
-	formatter := output.New(outputFmt)
-
-	// 先加载配置
-	cfg, err := config.LoadConfig(configPath)
-	if err != nil {
-		fmt.Print(formatter.FormatError("ERR_CONFIG_LOAD_FAILED", err.Error(), nil))
-		os.Exit(1)
-	}
-
-	// 检查 workspace 是否存在
-	workspaceExists := true
-	if _, err := os.Stat(cfg.Workspace); os.IsNotExist(err) {
-		workspaceExists = false
-	}
-
-	// 如果 workspace 不存在，先克隆仓库
-	if !workspaceExists {
-		fmt.Println("workspace 目录不存在，先克隆仓库...")
-		eng := engine.New(cfg)
-		if err := eng.Init(cmd.Context()); err != nil {
-			fmt.Print(formatter.FormatError("ERR_INIT_FAILED", err.Error(), nil))
-			os.Exit(1)
-		}
-		fmt.Println("✓ 仓库克隆完成")
-	}
-
-	// 扫描 workspace
-	newModules, err := config.ScanWorkspace(cmd.Context(), cfg.Workspace)
-	if err != nil {
-		fmt.Print(formatter.FormatError("ERR_SCAN_FAILED", err.Error(), nil))
-		os.Exit(1)
-	}
-
-	if len(newModules) == 0 {
-		fmt.Println("未发现新的 git 仓库")
-		return
-	}
-
-	// 合并模块（按 URL 去重）
-	existingURLs := make(map[string]bool)
-	for _, m := range cfg.Modules {
-		existingURLs[m.URL] = true
-	}
-
-	addedCount := 0
-	for _, m := range newModules {
-		if !existingURLs[m.URL] {
-			cfg.Modules = append(cfg.Modules, m)
-			existingURLs[m.URL] = true
-			addedCount++
-		}
-	}
-
-	// 保存配置
-	if err := config.SaveConfig(cfg, configPath); err != nil {
-		fmt.Print(formatter.FormatError("ERR_CONFIG_SAVE_FAILED", err.Error(), nil))
-		os.Exit(1)
-	}
-
-	fmt.Printf("✓ 已扫描并添加 %d 个模块\n", addedCount)
 }
 
 func runStatus(cmd *cobra.Command, args []string) {
@@ -321,8 +252,8 @@ func runStatus(cmd *cobra.Command, args []string) {
 	fmt.Print(formatter.FormatListResponse(envs))
 }
 
-// runInitConfig 运行配置初始化向导
-func runInitConfig(cmd *cobra.Command, args []string) {
+// runConfigCreate 运行配置创建命令
+func runConfigCreate(cmd *cobra.Command, args []string) {
 	scan, _ := cmd.Flags().GetBool("scan")
 
 	// 检查是否可以使用 TTY（只有在非 scan 模式时）
@@ -362,9 +293,9 @@ func runInitConfig(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// 如果是 scan 模式
+	// 如果是 scan 模式，扫描当前目录
 	if scan {
-		runInitConfigWithScan(cmd, cfg)
+		runConfigCreateWithScan(cmd, cfg)
 		return
 	}
 
@@ -376,8 +307,8 @@ func runInitConfig(cmd *cobra.Command, args []string) {
 	fmt.Printf("配置文件已创建: %s\n", configPath)
 }
 
-// runInitConfigWithScan 创建配置后扫描 workspace 自动发现模块
-func runInitConfigWithScan(cmd *cobra.Command, cfg *config.Config) {
+// runConfigCreateWithScan 创建配置后扫描当前目录自动发现模块
+func runConfigCreateWithScan(cmd *cobra.Command, cfg *config.Config) {
 	// 先保存初始配置
 	if err := config.SaveConfig(cfg, configPath); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -385,27 +316,16 @@ func runInitConfigWithScan(cmd *cobra.Command, cfg *config.Config) {
 	}
 	fmt.Printf("配置文件已创建: %s\n", configPath)
 
-	// 检查 workspace 是否存在
-	workspaceExists := true
-	if _, err := os.Stat(cfg.Workspace); os.IsNotExist(err) {
-		workspaceExists = false
-	}
-
-	// 如果 workspace 不存在，先克隆仓库
-	if !workspaceExists {
-		fmt.Println("workspace 目录不存在，先克隆仓库...")
-		eng := engine.New(cfg)
-		if err := eng.Init(cmd.Context()); err != nil {
-			fmt.Fprintf(os.Stderr, "克隆仓库失败: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("✓ 仓库克隆完成")
-	}
-
-	// 扫描 workspace
-	newModules, err := config.ScanWorkspace(cmd.Context(), cfg.Workspace)
+	// 扫描当前目录
+	currentDir, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "扫描 workspace 失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "获取当前目录失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	newModules, err := config.ScanWorkspace(cmd.Context(), currentDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "扫描目录失败: %v\n", err)
 		os.Exit(1)
 	}
 
