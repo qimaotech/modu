@@ -269,9 +269,8 @@ func (e *Engine) DeleteWorktree(ctx context.Context, feature string, force bool)
 		logger.Info("删除模块 worktree 成功: %s", moduleName)
 	}
 
-	// 删除主项目的 worktree
-	mainProjectName := filepath.Base(e.Config.Workspace)
-	mainProjectPath := filepath.Join(featurePath, mainProjectName)
+	// 删除主项目的 worktree（主项目直接放在 feature 目录下）
+	mainProjectPath := featurePath
 
 	// 检查主项目仓库是否存在
 	if _, err := os.Stat(e.Config.Workspace); os.IsNotExist(err) {
