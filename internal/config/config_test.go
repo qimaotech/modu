@@ -169,11 +169,11 @@ func containsAt(s, substr string) bool {
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.Workspace != "./workspace" {
-		t.Errorf("expected workspace ./workspace, got %s", cfg.Workspace)
+	if cfg.Workspace != "." {
+		t.Errorf("expected workspace ., got %s", cfg.Workspace)
 	}
-	if cfg.WorktreeRoot != "./worktrees" {
-		t.Errorf("expected worktree-root ./worktrees, got %s", cfg.WorktreeRoot)
+	if cfg.WorktreeRoot != "../worktrees" {
+		t.Errorf("expected worktree-root ../worktrees, got %s", cfg.WorktreeRoot)
 	}
 	if cfg.DefaultBase != "develop" {
 		t.Errorf("expected default-base develop, got %s", cfg.DefaultBase)

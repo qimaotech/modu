@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	errs "codeup.aliyun.com/qimao/public/devops/modu/internal/errors"
 	"os"
 	"path/filepath"
 	"strings"
 
+	errs "codeup.aliyun.com/qimao/public/devops/modu/internal/errors"
 	"gopkg.in/yaml.v3"
 )
 
@@ -28,6 +28,11 @@ func IsConfigNotFoundError(err error) bool {
 	return errors.Is(err, ErrConfigNotFound)
 }
 
+// IsConfigValidationError 检查是否为配置验证错误
+func IsConfigValidationError(err error) bool {
+	return errors.Is(err, errs.ErrConfigInvalid)
+}
+
 // ErrConfigNotFound 配置文件不存在错误
 var ErrConfigNotFound = errors.New("config file not found")
 
@@ -40,6 +45,39 @@ type Module struct {
 
 // LoadConfig 加载并校验配置文件
 func LoadConfig(path string) (*Config, error) {
+	cfg, err := loadConfigImpl(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := validate(cfg); err != nil {
+		return nil, err
+	}
+	// 设置默认值
+	if cfg.Concurrency == 0 {
+		cfg.Concurrency = 5
+	}
+	return cfg, nil
+}
+
+// LoadConfigForScan 加载配置文件用于 scan 命令，跳过模块验证
+func LoadConfigForScan(path string) (*Config, error) {
+	cfg, err := loadConfigImpl(path)
+	if err != nil {
+		return nil, err
+	}
+	// 只验证基础字段，不验证模块
+	if err := validateBasic(cfg); err != nil {
+		return nil, err
+	}
+	// 设置默认值
+	if cfg.Concurrency == 0 {
+		cfg.Concurrency = 5
+	}
+	return cfg, nil
+}
+
+// loadConfigImpl 加载配置文件的内部实现
+func loadConfigImpl(path string) (*Config, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve config path: %w", err)
@@ -58,13 +96,13 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse yaml: %w", err)
 	}
 
-	if err := validate(&cfg); err != nil {
-		return nil, err
+	// 将 workspace 和 worktree-root 转换为绝对路径（相对于配置文件所在目录）
+	configDir := filepath.Dir(absPath)
+	if cfg.Workspace != "" && !filepath.IsAbs(cfg.Workspace) {
+		cfg.Workspace = filepath.Join(configDir, cfg.Workspace)
 	}
-
-	// 设置默认值
-	if cfg.Concurrency == 0 {
-		cfg.Concurrency = 5
+	if cfg.WorktreeRoot != "" && !filepath.IsAbs(cfg.WorktreeRoot) {
+		cfg.WorktreeRoot = filepath.Join(configDir, cfg.WorktreeRoot)
 	}
 
 	return &cfg, nil
@@ -88,11 +126,26 @@ func validate(cfg *Config) error {
 	return errors.Join(validationErrs...)
 }
 
+// validateBasic 校验配置基础必填字段（不验证模块）
+func validateBasic(cfg *Config) error {
+	var validationErrs []error
+	if cfg.Workspace == "" {
+		validationErrs = append(validationErrs, fmt.Errorf("%w: workspace is required", errs.ErrConfigInvalid))
+	}
+	if cfg.WorktreeRoot == "" {
+		validationErrs = append(validationErrs, fmt.Errorf("%w: worktree-root is required", errs.ErrConfigInvalid))
+	}
+	if cfg.DefaultBase == "" {
+		validationErrs = append(validationErrs, fmt.Errorf("%w: default-base is required", errs.ErrConfigInvalid))
+	}
+	return errors.Join(validationErrs...)
+}
+
 // DefaultConfig 返回默认配置模板
 func DefaultConfig() *Config {
 	return &Config{
-		Workspace:    "./workspace",
-		WorktreeRoot: "./worktrees",
+		Workspace:    ".",
+		WorktreeRoot: "../worktrees",
 		DefaultBase:  "develop",
 		Concurrency:  5,
 		AutoFetch:    true,
@@ -117,6 +170,24 @@ func SaveConfig(cfg *Config, path string) error {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
+	// 自动创建 WorktreeRoot 目录（相对于配置文件所在目录）
+	if cfg.WorktreeRoot != "" {
+		configDir := filepath.Dir(absPath)
+		worktreeRootAbs := cfg.WorktreeRoot
+
+		// 处理相对路径（相对于配置文件目录）
+		if !filepath.IsAbs(worktreeRootAbs) {
+			// 如果是 ../ 开头的相对路径，相对于配置文件目录解析
+			worktreeRootAbs = filepath.Join(configDir, worktreeRootAbs)
+		}
+
+		// 检查目录是否可以创建（不阻塞保存配置）
+		if err := os.MkdirAll(worktreeRootAbs, 0755); err != nil {
+			// 如果创建失败，只打印警告，不阻止保存配置
+			fmt.Fprintf(os.Stderr, "警告: 无法创建 worktree 目录 %s: %v\n", worktreeRootAbs, err)
+		}
+	}
+
 	return nil
 }
 
@@ -138,7 +209,8 @@ func ScanWorkspace(ctx context.Context, workspacePath string) ([]Module, error) 
 		return nil, fmt.Errorf("failed to read workspace directory: %w", err)
 	}
 
-	var modules []Module
+	// 预分配模块切片
+	modules := make([]Module, 0, len(entries))
 	for _, entry := range entries {
 		// 只处理目录
 		if !entry.IsDir() {
@@ -198,4 +270,61 @@ func readGitRemoteURL(gitConfigPath string) (string, error) {
 	}
 
 	return "", fmt.Errorf("remote origin not found")
+}
+
+// UpdateGitignore 更新主项目的 .gitignore，添加模块目录
+func UpdateGitignore(workspacePath string, modules []Module) error {
+	gitignorePath := filepath.Join(workspacePath, ".gitignore")
+	var existingEntries []string
+
+	// 读取现有的 .gitignore
+	if data, err := os.ReadFile(gitignorePath); err == nil {
+		existingEntries = strings.Split(strings.TrimSpace(string(data)), "\n")
+	}
+
+	// 收集需要添加的模块名
+	entriesToAdd := make(map[string]bool)
+	for _, m := range modules {
+		entriesToAdd[m.Name] = true
+	}
+
+	// 检查是否需要添加新条目
+	needsUpdate := false
+	for name := range entriesToAdd {
+		found := false
+		for _, entry := range existingEntries {
+			entry = strings.TrimSpace(entry)
+			if entry == name || entry == name+"/" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			needsUpdate = true
+			break
+		}
+	}
+
+	if !needsUpdate {
+		return nil
+	}
+
+	// 追加新条目
+	var newContent strings.Builder
+	if _, err := os.Stat(gitignorePath); err == nil {
+		// 文件存在，读取内容
+		data, _ := os.ReadFile(gitignorePath)
+		newContent.WriteString(strings.TrimSpace(string(data)))
+	}
+
+	// 添加模块目录
+	newContent.WriteString("\n\n# modu modules\n")
+	for name := range entriesToAdd {
+		newContent.WriteString(name + "/\n")
+	}
+
+	if err := os.WriteFile(gitignorePath, []byte(newContent.String()), 0600); err != nil {
+		return fmt.Errorf("failed to write .gitignore: %w", err)
+	}
+	return nil
 }

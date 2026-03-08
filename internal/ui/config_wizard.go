@@ -49,8 +49,8 @@ type ConfigWizard struct {
 func NewConfigWizard() *ConfigWizard {
 	return &ConfigWizard{
 		step:       0,
-		workspace:  "./workspace",
-		worktree:   "./worktrees",
+		workspace:  ".",
+		worktree:   "../worktrees",
 		base:       "develop",
 		modules:    []config.Module{},
 		inputField: 0,
@@ -126,12 +126,12 @@ func (m *ConfigWizard) handleEnter() (tea.Model, tea.Cmd) {
 	switch m.step {
 	case 0:
 		if m.workspace == "" {
-			m.workspace = "./workspace"
+			m.workspace = "."
 		}
 		m.step = 1
 	case 1:
 		if m.worktree == "" {
-			m.worktree = "./worktrees"
+			m.worktree = "../worktrees"
 		}
 		m.step = 2
 	case 2:
@@ -223,7 +223,8 @@ func (m *ConfigWizard) View() string {
 	case 0:
 		s.WriteString(wizardHeaderStyle.Render("📁 步骤 1/4: 仓库目录"))
 		s.WriteString("\n\n")
-		s.WriteString(wizardItemStyle.Render("请输入主仓库所在目录（裸仓库）：\n"))
+		s.WriteString(wizardItemStyle.Render("请输入主仓库所在目录（裸仓库）："))
+		s.WriteString("\n\n")
 		s.WriteString(wizardInputStyle.Render("> " + m.workspace + "_"))
 		s.WriteString("\n\n")
 		s.WriteString(wizardHelpStyle.Render("提示: 包含 .git 的仓库目录，按 Enter 继续"))
@@ -231,7 +232,8 @@ func (m *ConfigWizard) View() string {
 	case 1:
 		s.WriteString(wizardHeaderStyle.Render("📂 步骤 2/4: Worktree 目录"))
 		s.WriteString("\n\n")
-		s.WriteString(wizardItemStyle.Render("请输入特性分支代码存放目录：\n"))
+		s.WriteString(wizardItemStyle.Render("请输入特性分支代码存放目录："))
+		s.WriteString("\n\n")
 		s.WriteString(wizardInputStyle.Render("> " + m.worktree + "_"))
 		s.WriteString("\n\n")
 		s.WriteString(wizardHelpStyle.Render("按 Enter 继续，Backspace 返回"))
@@ -239,29 +241,36 @@ func (m *ConfigWizard) View() string {
 	case 2:
 		s.WriteString(wizardHeaderStyle.Render("🌿 步骤 3/4: 默认分支"))
 		s.WriteString("\n\n")
-		s.WriteString(wizardItemStyle.Render("请输入默认基准分支名称：\n"))
+		s.WriteString(wizardItemStyle.Render("请输入默认基准分支名称："))
+		s.WriteString("\n\n")
 		s.WriteString(wizardInputStyle.Render("> " + m.base + "_"))
 		s.WriteString("\n\n")
-		s.WriteString(wizardHelpStyle.Render("如: develop, main, master\n按 Enter 继续，Backspace 返回"))
+		s.WriteString(wizardHelpStyle.Render("如: develop, main, master"))
+		s.WriteString("\n\n")
+		s.WriteString(wizardHelpStyle.Render("按 Enter 继续，Backspace 返回"))
 
 	case 3:
 		s.WriteString(wizardHeaderStyle.Render("📦 步骤 4/4: 模块配置"))
 		s.WriteString("\n\n")
 
 		if len(m.modules) > 0 {
-			s.WriteString(wizardItemStyle.Render("已添加模块:\n"))
+			s.WriteString(wizardItemStyle.Render("已添加模块:"))
+			s.WriteString("\n\n")
 			for _, mod := range m.modules {
-				s.WriteString(wizardItemStyle.Render(fmt.Sprintf("  • %s -> %s\n", mod.Name, mod.URL)))
+				s.WriteString(wizardItemStyle.Render(fmt.Sprintf("  • %s -> %s", mod.Name, mod.URL)))
+				s.WriteString("\n\n")
 			}
 			s.WriteString("\n")
 		}
 
-		s.WriteString(wizardItemStyle.Render("添加模块（名称 + Enter + URL + Enter）：\n"))
+		s.WriteString(wizardItemStyle.Render("添加模块（名称 + Enter + URL + Enter）："))
+		s.WriteString("\n\n")
 		cursor := "_"
 		if m.inputField == 0 {
 			s.WriteString(wizardInputStyle.Render("名称: " + m.moduleName + cursor))
 		} else {
-			s.WriteString(wizardInputStyle.Render("名称: " + m.moduleName + "\n"))
+			s.WriteString(wizardInputStyle.Render("名称: " + m.moduleName))
+			s.WriteString("\n\n")
 			s.WriteString(wizardInputStyle.Render("URL:  " + m.moduleURL + cursor))
 		}
 		s.WriteString("\n\n")
@@ -270,11 +279,16 @@ func (m *ConfigWizard) View() string {
 	case 4:
 		s.WriteString(wizardHeaderStyle.Render("✅ 确认配置"))
 		s.WriteString("\n\n")
-		s.WriteString(wizardItemStyle.Render("请确认以下配置：\n\n"))
-		s.WriteString(wizardItemStyle.Render(fmt.Sprintf("  仓库目录:     %s\n", m.workspace)))
-		s.WriteString(wizardItemStyle.Render(fmt.Sprintf("  Worktree目录: %s\n", m.worktree)))
-		s.WriteString(wizardItemStyle.Render(fmt.Sprintf("  默认分支:     %s\n", m.base)))
-		s.WriteString(wizardItemStyle.Render(fmt.Sprintf("  模块数量:     %d\n\n", len(m.modules))))
+		s.WriteString(wizardItemStyle.Render("请确认以下配置："))
+		s.WriteString("\n\n")
+		s.WriteString(wizardItemStyle.Render(fmt.Sprintf("  仓库目录:     %s\t", m.workspace)))
+		s.WriteString("\n")
+		s.WriteString(wizardItemStyle.Render(fmt.Sprintf("  Worktree目录: %s\t", m.worktree)))
+		s.WriteString("\n")
+		s.WriteString(wizardItemStyle.Render(fmt.Sprintf("  默认分支:     %s\t", m.base)))
+		s.WriteString("\n")
+		s.WriteString(wizardItemStyle.Render(fmt.Sprintf("  模块数量:     %d\t", len(m.modules))))
+		s.WriteString("\n")
 		s.WriteString(wizardHelpStyle.Render("按 Enter 保存配置"))
 
 	default:

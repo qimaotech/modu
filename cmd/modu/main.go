@@ -1,10 +1,9 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"codeup.aliyun.com/qimao/public/devops/modu/internal/config"
@@ -18,13 +17,9 @@ import (
 
 // isInteractiveTerminal 检查是否是交互式终端
 func isInteractiveTerminal() bool {
-	// 检查 stdin 是否为 TTY
-	cmd := exec.CommandContext(context.Background(), "test", "-t", "0")
-	cmd.Stdin = os.Stdin
-	if err := cmd.Run(); err != nil {
-		return false
-	}
-	return true
+	// 检查 stdin/stdout/stderr 是否为 TTY
+	fileInfo, _ := os.Stdin.Stat()
+	return fileInfo.Mode()&os.ModeCharDevice != 0
 }
 
 var (
@@ -71,6 +66,7 @@ func main() {
 		Run:   runCreate,
 	}
 	createCmd.Flags().String("base", "develop", "基准分支")
+	createCmd.Flags().StringSlice("modules", nil, "指定要创建的模块（逗号分隔），默认创建所有模块")
 
 	// delete 命令
 	deleteCmd := &cobra.Command{
@@ -87,6 +83,7 @@ func main() {
 		Short: "列出所有 feature 工作树",
 		Run:   runList,
 	}
+	listCmd.Flags().BoolP("verbose", "v", false, "显示详细信息（模块、分支、状态）")
 
 	// info 命令
 	infoCmd := &cobra.Command{
@@ -106,8 +103,8 @@ func main() {
 		Short: "创建配置文件",
 		Run:   runConfigCreate,
 	}
-	configCreateCmd.Flags().String("workspace", "./workspace", "仓库目录")
-	configCreateCmd.Flags().String("worktree-root", "./worktrees", "Worktree 存放目录")
+	configCreateCmd.Flags().String("workspace", ".", "仓库目录")
+	configCreateCmd.Flags().String("worktree-root", "../worktrees", "Worktree 存放目录")
 	configCreateCmd.Flags().String("default-base", "develop", "默认基准分支")
 	configCreateCmd.Flags().StringArray("module", []string{}, "模块 (格式: name=url)")
 	configCmd.AddCommand(configCreateCmd)
@@ -126,6 +123,7 @@ func main() {
 		Short: "初始化仓库（克隆所有配置的仓库）",
 		Run:   runInit,
 	}
+	initCmd.Flags().Bool("scan", false, "自动扫描并添加模块")
 
 	// status 命令
 	statusCmd := &cobra.Command{
@@ -167,7 +165,33 @@ func main() {
 func loadConfig() *engine.Engine {
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n\n", err)
+
+		// 检查配置文件是否存在
+		if _, statErr := os.Stat(configPath); os.IsNotExist(statErr) {
+			fmt.Fprintf(os.Stderr, "配置文件 %s 不存在\n", configPath)
+			fmt.Fprintf(os.Stderr, "请运行以下命令创建配置文件:\n")
+			fmt.Fprintf(os.Stderr, "  modu config create\n")
+			fmt.Fprintf(os.Stderr, "或使用交互式向导:\n")
+			fmt.Fprintf(os.Stderr, "  modu init\n")
+		} else if config.IsConfigValidationError(err) {
+			// 配置验证错误，给出具体提示
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "at least one module is required") {
+				fmt.Fprintf(os.Stderr, "配置文件中没有模块，请添加至少一个模块:\n")
+				fmt.Fprintf(os.Stderr, "  modu config create --module \"name=https://github.com/xxx.git\"\n")
+			} else if strings.Contains(errMsg, "workspace is required") {
+				fmt.Fprintf(os.Stderr, "请在配置文件中设置 workspace 字段\n")
+			} else if strings.Contains(errMsg, "worktree-root is required") {
+				fmt.Fprintf(os.Stderr, "请在配置文件中设置 worktree-root 字段\n")
+			} else if strings.Contains(errMsg, "default-base is required") {
+				fmt.Fprintf(os.Stderr, "请在配置文件中设置 default-base 字段\n")
+			} else {
+				fmt.Fprintf(os.Stderr, "请检查配置文件格式是否正确\n")
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "请检查配置文件格式是否正确\n")
+		}
 		os.Exit(1)
 	}
 	return engine.New(cfg)
@@ -176,8 +200,79 @@ func loadConfig() *engine.Engine {
 func runCreate(cmd *cobra.Command, args []string) {
 	feature := args[0]
 	base, _ := cmd.Flags().GetString("base")
+	modules, _ := cmd.Flags().GetStringSlice("modules")
 
 	eng := loadConfig()
+
+	// 检查 feature 是否已存在
+	featurePath := filepath.Join(eng.Config.WorktreeRoot, feature)
+	var existingModules []string
+	if _, err := os.Stat(featurePath); err == nil {
+		// feature 已存在，获取已有的模块
+		fmt.Printf("Feature %s 已存在，以下模块已创建:\n", feature)
+		entries, _ := os.ReadDir(featurePath)
+		for _, entry := range entries {
+			if entry.IsDir() && entry.Name() != ".git" {
+				existingModules = append(existingModules, entry.Name())
+				fmt.Printf("  - %s\n", entry.Name())
+			}
+		}
+		fmt.Println()
+	}
+
+	// 如果没有指定 modules
+	if len(modules) == 0 {
+		if isInteractiveTerminal() {
+			// 交互式终端：使用 TUI 选择
+			selectedModules, err := ui.SelectModules(eng.Config.Modules, existingModules)
+			if err != nil {
+				// TUI 不可用时回退到非交互模式
+				fmt.Fprintf(os.Stderr, "TUI 不可用: %v\n", err)
+			} else if len(selectedModules) == 0 {
+				fmt.Println("未选择任何模块，取消创建")
+				return
+			} else {
+				eng.Config.Modules = selectedModules
+			}
+		} else {
+			// 非交互式：自动过滤掉已存在的模块
+			if len(existingModules) > 0 {
+				existingMap := make(map[string]bool)
+				for _, name := range existingModules {
+					existingMap[name] = true
+				}
+				var filtered []config.Module
+				for _, m := range eng.Config.Modules {
+					if !existingMap[m.Name] {
+						filtered = append(filtered, m)
+					}
+				}
+				eng.Config.Modules = filtered
+				fmt.Printf("将创建以下新模块: ")
+				for i, m := range eng.Config.Modules {
+					if i > 0 {
+						fmt.Print(", ")
+					}
+					fmt.Print(m.Name)
+				}
+				fmt.Println()
+			}
+		}
+	} else if len(modules) > 0 {
+		// 命令行指定了 modules，过滤配置
+		moduleSet := make(map[string]bool)
+		for _, m := range modules {
+			moduleSet[m] = true
+		}
+		var filtered []config.Module
+		for _, m := range eng.Config.Modules {
+			if moduleSet[m.Name] {
+				filtered = append(filtered, m)
+			}
+		}
+		eng.Config.Modules = filtered
+	}
+
 	formatter := output.New(outputFmt)
 
 	err := eng.CreateWorktree(cmd.Context(), feature, base)
@@ -234,16 +329,119 @@ func runInfo(cmd *cobra.Command, args []string) {
 }
 
 func runInit(cmd *cobra.Command, args []string) {
-	eng := loadConfig()
+	shouldScan, _ := cmd.Flags().GetBool("scan")
+
+	// 检查配置文件是否存在
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		// 配置文件不存在，先尝试扫描
+		if shouldScan {
+			fmt.Println("配置文件不存在，正在扫描目录自动发现模块...")
+			fmt.Println()
+			// 创建默认配置用于扫描
+			cfg := config.DefaultConfig()
+			if err := config.SaveConfig(cfg, configPath); err != nil {
+				fmt.Fprintf(os.Stderr, "创建配置文件失败: %v\n", err)
+				os.Exit(1)
+			}
+			runConfigScan(cmd, []string{})
+		}
+
+		// 再次检查配置文件是否存在（扫描后可能已创建）
+		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			// 尝试使用交互式向导
+			if isInteractiveTerminal() {
+				fmt.Println("配置文件不存在，正在启动配置向导...")
+				fmt.Println()
+				if err := ui.RunConfigWizard(); err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(1)
+				}
+				// 配置向导完成后，重新加载配置
+				fmt.Println()
+				fmt.Println("配置文件已创建，正在初始化仓库...")
+			} else {
+				// 非交互式环境：创建默认配置并提示用户
+				cfg := config.DefaultConfig()
+				if err := config.SaveConfig(cfg, configPath); err != nil {
+					fmt.Fprintf(os.Stderr, "创建默认配置文件失败: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Printf("已创建默认配置文件: %s\n", configPath)
+				fmt.Println()
+				fmt.Println("请编辑配置文件添加模块后再次运行:")
+				fmt.Printf("  modu config create --module \"name=https://github.com/xxx.git\"\n")
+				fmt.Println("或使用交互式向导:")
+				fmt.Printf("  modu init\n")
+				os.Exit(0)
+			}
+		}
+	}
+
+	// 先用不验证模块的方式加载配置
+	cfg, err := config.LoadConfigForScan(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 如果没有模块且用户指定了 --scan，执行扫描
+	if !shouldScan && len(cfg.Modules) == 0 {
+		// 没有模块，检查是否在交互式环境中
+		if isInteractiveTerminal() {
+			fmt.Println()
+			fmt.Print("未发现任何模块，是否扫描当前目录自动发现模块? [Y/n]: ")
+			var input string
+			if _, err := fmt.Scanln(&input); err != nil {
+				// 读取失败，使用默认值
+				input = ""
+			}
+			input = strings.ToLower(strings.TrimSpace(input))
+			if input == "" || input == "y" || input == "yes" {
+				shouldScan = true
+			}
+		} else {
+			fmt.Println()
+			fmt.Println("提示: 当前没有配置模块，如需自动发现模块请运行:")
+			fmt.Printf("  modu init --scan\n")
+		}
+	}
+
+	if shouldScan && len(cfg.Modules) == 0 {
+		fmt.Println()
+		fmt.Println("正在扫描目录自动发现模块...")
+		runConfigScan(cmd, []string{})
+		// 重新加载配置
+		cfg, err = config.LoadConfigForScan(configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// 使用完整配置创建 Engine
+	eng := engine.New(cfg)
 	formatter := output.New(outputFmt)
 
-	err := eng.Init(cmd.Context())
+	err = eng.Init(cmd.Context())
 	if err != nil {
 		fmt.Print(formatter.FormatError("ERR_INIT_FAILED", err.Error(), nil))
 		os.Exit(1)
 	}
 
 	fmt.Println("✓ Initialized all repositories")
+
+	// 更新主项目的 .gitignore，添加模块目录
+	if cfg.Workspace != "" && len(cfg.Modules) > 0 {
+		// 将 workspace 转换为绝对路径（相对于配置文件）
+		workspacePath := cfg.Workspace
+		if !filepath.IsAbs(workspacePath) {
+			configDir := filepath.Dir(configPath)
+			workspacePath = filepath.Join(configDir, workspacePath)
+		}
+		if err := config.UpdateGitignore(workspacePath, cfg.Modules); err != nil {
+			fmt.Fprintf(os.Stderr, "警告: 更新 .gitignore 失败: %v\n", err)
+		}
+	}
 }
 
 func runStatus(cmd *cobra.Command, args []string) {
@@ -315,7 +513,7 @@ func runConfigScan(cmd *cobra.Command, args []string) {
 	}
 
 	// 加载现有配置
-	cfg, err := config.LoadConfig(configPath)
+	cfg, err := config.LoadConfigForScan(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
 		os.Exit(1)
@@ -358,6 +556,19 @@ func runConfigScan(cmd *cobra.Command, args []string) {
 	if err := config.SaveConfig(cfg, configPath); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+
+	// 更新主项目的 .gitignore，添加模块目录
+	if cfg.Workspace != "" && addedCount > 0 {
+		// 将 workspace 转换为绝对路径（相对于配置文件）
+		workspacePath := cfg.Workspace
+		if !filepath.IsAbs(workspacePath) {
+			configDir := filepath.Dir(configPath)
+			workspacePath = filepath.Join(configDir, workspacePath)
+		}
+		if err := config.UpdateGitignore(workspacePath, cfg.Modules); err != nil {
+			fmt.Fprintf(os.Stderr, "警告: 更新 .gitignore 失败: %v\n", err)
+		}
 	}
 
 	fmt.Printf("✓ 已扫描并添加 %d 个模块\n", addedCount)

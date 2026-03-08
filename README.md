@@ -65,18 +65,25 @@ modules:
 | `url`         | 是   | Git 仓库地址     |
 | `base-branch` | 否   | 覆盖全局默认分支 |
 
+### 自动 .gitignore 更新
+
+执行 `modu init` 或 `modu config scan` 时会自动更新主仓库的 `.gitignore` 文件，添加所有模块目录，避免模块代码被意外提交到主仓库。
+
 ### 命令示例
 
 ```bash
 # 初始化所有仓库
 modu init
+modu init --scan  # 自动扫描并添加模块
 
 # 创建 feature 分支
 modu create my-feature
 modu create my-feature --base main
+modu create my-feature --modules frontend,backend  # 只创建指定模块
 
 # 列出所有 worktree
 modu list
+modu list -v  # 显示详细信息（模块、分支、状态）
 
 # 查看详情
 modu info my-feature
@@ -97,6 +104,14 @@ modu list -o json
 # 启动 TUI
 modu
 modu tui
+
+# 创建配置文件
+modu config create
+modu config create --module "frontend=https://codeup.aliyun.com/example/frontend.git"
+modu config create --scan  # 自动扫描并添加模块
+
+# 扫描目录添加模块
+modu config scan
 ```
 
 ## 开发
