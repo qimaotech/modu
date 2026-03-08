@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"codeup.aliyun.com/qimao/public/devops/modu/internal/errors"
+	"codeup.aliyun.com/qimao/public/devops/modu/internal/logger"
 )
 
 // GitProxy Git 操作真实实现
@@ -78,22 +79,39 @@ func (g *GitProxy) RemoveWorktree(ctx context.Context, path string) error {
 
 // RemoveWorktreeAndBranch 删除 worktree 并删除对应的分支
 func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
+	logger.Debug("RemoveWorktreeAndBranch: repo=%s, branch=%s, path=%s", repoPath, branch, worktreePath)
+
 	// 先用 git worktree remove 移除
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "remove", "--force", worktreePath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		logger.Warn("git worktree remove 失败，尝试直接删除目录: path=%s, error=%s", worktreePath, string(out))
 		// 如果 worktree remove 失败，尝试直接删除目录
 		if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
+			logger.Error("删除目录失败: path=%s, error=%v", worktreePath, rmErr)
 			return fmt.Errorf("[git worktree remove] failed to remove worktree at %s: %w, output: %s", worktreePath, errors.ErrGitExec, string(out))
 		}
+		logger.Info("直接删除目录成功: %s", worktreePath)
 	}
 
-	// 删除对应的分支
+	// 先 prune 清理过期的 worktree 引用
+	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "prune")
+	if err := cmd.Run(); err != nil {
+		logger.Warn("git worktree prune 失败: %v", err)
+	} else {
+		logger.Info("git worktree prune 成功")
+	}
+
+	// 再删除对应的分支
+	logger.Info("删除分支: repo=%s, branch=%s", repoPath, branch)
 	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "branch", "-D", branch)
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		// 分支可能不存在，忽略错误
+		logger.Warn("删除分支失败（可能不存在）: branch=%s, error=%s", branch, string(out))
 		fmt.Printf("Warning: failed to delete branch %s: %s\n", branch, string(out))
+	} else {
+		logger.Info("删除分支成功: %s", branch)
 	}
 
 	return nil

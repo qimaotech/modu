@@ -124,8 +124,9 @@ func (m *App) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state = "error"
 		} else {
 			m.message = "Deleted feature: " + m.feature
-			m.state = "list"
+			m.state = "loading"
 			m.selected = 0
+			return m, m.loadEnvs
 		}
 	case "n", "esc":
 		m.state = "list"
