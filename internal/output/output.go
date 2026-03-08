@@ -164,17 +164,7 @@ func (f *Formatter) FormatListResponse(envs []core.WorktreeEnv) string {
 	var sb strings.Builder
 	sb.WriteString("Features:\n")
 	for _, env := range envs {
-		sb.WriteString(fmt.Sprintf("  - %s\n", env.Name))
-
-		// 输出主项目
-		if env.MainProject != nil {
-			status := "clean"
-			if env.MainProject.IsDirty {
-				status = "dirty"
-			}
-			sb.WriteString(fmt.Sprintf("    - %s: %s (%s) [%s]\n",
-				env.MainProject.Name, env.MainProject.Branch, status, env.MainProject.Path))
-		}
+		sb.WriteString(fmt.Sprintf("  - %s[%s]\n", env.Name, env.MainProject.Path))
 
 		// 输出模块
 		for _, mod := range env.Modules {

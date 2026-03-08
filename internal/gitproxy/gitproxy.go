@@ -14,6 +14,8 @@ type GitClient interface {
 	GetStatus(ctx context.Context, path string) (Status, error)
 	// RemoveWorktree 删除工作树
 	RemoveWorktree(ctx context.Context, path string) error
+	// RemoveWorktreeAndBranch 删除工作树并删除对应分支
+	RemoveWorktreeAndBranch(ctx context.Context, repoPath, branch, worktreePath string) error
 	// ListWorktrees 列出所有工作树
 	ListWorktrees(ctx context.Context, repoPath string) ([]WorktreeInfo, error)
 	// Fetch 从远程获取最新

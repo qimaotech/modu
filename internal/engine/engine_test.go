@@ -13,12 +13,13 @@ import (
 
 // MockGitClient 用于测试的 Mock Git 客户端
 type MockGitClient struct {
-	CloneFunc           func(ctx context.Context, url, path string) error
-	CreateWorktreeFunc  func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error
-	GetStatusFunc       func(ctx context.Context, path string) (gitproxy.Status, error)
-	RemoveWorktreeFunc  func(ctx context.Context, path string) error
-	ListWorktreesFunc   func(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error)
-	FetchFunc           func(ctx context.Context, repoPath string) error
+	CloneFunc                  func(ctx context.Context, url, path string) error
+	CreateWorktreeFunc         func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error
+	GetStatusFunc             func(ctx context.Context, path string) (gitproxy.Status, error)
+	RemoveWorktreeFunc        func(ctx context.Context, path string) error
+	RemoveWorktreeAndBranchFunc func(ctx context.Context, repoPath, branch, worktreePath string) error
+	ListWorktreesFunc         func(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error)
+	FetchFunc                 func(ctx context.Context, repoPath string) error
 }
 
 var _ gitproxy.GitClient = (*MockGitClient)(nil)
@@ -47,6 +48,13 @@ func (m *MockGitClient) GetStatus(ctx context.Context, path string) (gitproxy.St
 func (m *MockGitClient) RemoveWorktree(ctx context.Context, path string) error {
 	if m.RemoveWorktreeFunc != nil {
 		return m.RemoveWorktreeFunc(ctx, path)
+	}
+	return nil
+}
+
+func (m *MockGitClient) RemoveWorktreeAndBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
+	if m.RemoveWorktreeAndBranchFunc != nil {
+		return m.RemoveWorktreeAndBranchFunc(ctx, repoPath, branch, worktreePath)
 	}
 	return nil
 }

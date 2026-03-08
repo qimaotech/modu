@@ -220,7 +220,16 @@ func runCreate(cmd *cobra.Command, args []string) {
 		fmt.Println()
 	}
 
+	// 记录哪些模块需要删除（已存在但用户取消选中的）
+	modulesToDelete := make(map[string]bool)
+	for _, name := range existingModules {
+		modulesToDelete[name] = true // 默认标记为待删除
+	}
+
 	// 如果没有指定 modules
+	// 标记是否只删除不创建
+	deleteOnly := false
+
 	if len(modules) == 0 {
 		if isInteractiveTerminal() {
 			// 交互式终端：使用 TUI 选择
@@ -228,14 +237,19 @@ func runCreate(cmd *cobra.Command, args []string) {
 			if err != nil {
 				// TUI 不可用时回退到非交互模式
 				fmt.Fprintf(os.Stderr, "TUI 不可用: %v\n", err)
-			} else if len(selectedModules) == 0 {
-				fmt.Println("未选择任何模块，取消创建")
-				return
+			} else if len(selectedModules) == 0 && len(existingModules) > 0 {
+				// 用户没有选择任何模块，只删除不创建
+				fmt.Println("未选择任何模块，将删除所有已存在的模块")
+				deleteOnly = true
 			} else {
 				eng.Config.Modules = selectedModules
+				// 标记用户选中的模块为不需要删除
+				for _, m := range selectedModules {
+					delete(modulesToDelete, m.Name)
+				}
 			}
 		} else {
-			// 非交互式：自动过滤掉已存在的模块
+			// 非交互式：自动过滤掉已存在的模块（不删除，只创建新的）
 			if len(existingModules) > 0 {
 				existingMap := make(map[string]bool)
 				for _, name := range existingModules {
@@ -256,6 +270,8 @@ func runCreate(cmd *cobra.Command, args []string) {
 					fmt.Print(m.Name)
 				}
 				fmt.Println()
+				// 非交互模式下，不删除任何模块
+				modulesToDelete = make(map[string]bool)
 			}
 		}
 	} else if len(modules) > 0 {
@@ -274,6 +290,28 @@ func runCreate(cmd *cobra.Command, args []string) {
 	}
 
 	formatter := output.New(outputFmt)
+
+	// 先删除需要移除的模块
+	if len(modulesToDelete) > 0 && len(existingModules) > 0 {
+		fmt.Println("删除模块:")
+		for name := range modulesToDelete {
+			modulePath := filepath.Join(featurePath, name)
+			repoPath := filepath.Join(eng.Config.Workspace, name)
+			// 删除 worktree 和分支
+			if err := eng.GitProxy.RemoveWorktreeAndBranch(cmd.Context(), repoPath, feature, modulePath); err != nil {
+				fmt.Printf("  - %s: 删除失败 %v\n", name, err)
+			} else {
+				fmt.Printf("  - %s: 已删除（含分支）\n", name)
+			}
+		}
+		fmt.Println()
+	}
+
+	// 如果是删除模式（用户未选择任何模块），则不创建新模块
+	if deleteOnly {
+		fmt.Println("✓ 操作完成")
+		return
+	}
 
 	err := eng.CreateWorktree(cmd.Context(), feature, base)
 	if err != nil {

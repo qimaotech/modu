@@ -76,6 +76,29 @@ func (g *GitProxy) RemoveWorktree(ctx context.Context, path string) error {
 	return nil
 }
 
+// RemoveWorktreeAndBranch 删除 worktree 并删除对应的分支
+func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
+	// 先用 git worktree remove 移除
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "remove", "--force", worktreePath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// 如果 worktree remove 失败，尝试直接删除目录
+		if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
+			return fmt.Errorf("[git worktree remove] failed to remove worktree at %s: %w, output: %s", worktreePath, errors.ErrGitExec, string(out))
+		}
+	}
+
+	// 删除对应的分支
+	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "branch", "-D", branch)
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		// 分支可能不存在，忽略错误
+		fmt.Printf("Warning: failed to delete branch %s: %s\n", branch, string(out))
+	}
+
+	return nil
+}
+
 // ListWorktrees 列出所有工作树
 func (g *GitProxy) ListWorktrees(ctx context.Context, repoPath string) ([]WorktreeInfo, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "list", "--porcelain")

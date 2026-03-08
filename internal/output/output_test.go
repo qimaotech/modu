@@ -160,6 +160,10 @@ func TestFormatListResponse_Text(t *testing.T) {
 	envs := []core.WorktreeEnv{
 		{
 			Name: "feature-1",
+			MainProject: &core.ModuleStatus{
+				Name: "main",
+				Path: "/path/to/main",
+			},
 			Modules: []core.ModuleStatus{
 				{Name: "module1", Branch: "feature-1", IsDirty: false},
 				{Name: "module2", Branch: "feature-1", IsDirty: true},
