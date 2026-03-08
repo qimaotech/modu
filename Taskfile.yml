@@ -1,104 +1,77 @@
 version: "3"
 
-# 所有子模块列表
-vars:
-  ALL_MODULES:
-    - pixiu-ad-backend
-    - pixiu-ad-drs
-    - pixiu-ad-log
-    - pixiu-ad-server
-    - pixiu-ads-client
-    - pixiu-ads-drs
-    - pixiu-ads-server
-    - pixiu-adx-drs
-    - pixiu-adx-server
-    - pixiu-demand-server
-    - pixiu-deployment
-    - pixiu-frontend
-    - pixiu-monitor
-    - pixiu-toolkit
-    - baize-ad-drs
-    - baize-ad-server
-    - baize-admin
-    - baize-adx-drs
-    - baize-adx-server
-    - baize-frontend
-    - baize-object
-    - baize-ssp
-
-  WORKTREE: "{{.USER_WORKING_DIR}}/../worktrees"
-  WORKSPACE: "{{.USER_WORKING_DIR}}"
-
-env:
-  BRANCH: ""
-  GOROOT: ""
-
 tasks:
   default:
     desc: Show help
     cmds:
       - task --list
 
+  install:
+    desc: 安装开发工具
+    cmds:
+      - echo "No extra tools needed"
+
   # ========== 开发工具 ==========
-  tidy:
-    desc: 整理 Go 模块依赖
-    cmds:
-      - unset GOROOT && go mod tidy
-
-  vet:
-    desc: 代码静态检查
-    cmds:
-      - unset GOROOT && go vet ./...
-
-  fmt:
-    desc: 代码格式化
-    cmds:
-      - unset GOROOT && go fmt ./...
-
-  lint:
-    desc: 代码检查
-    cmds:
-      - unset GOROOT && golangci-lint run ./...
-
-  # ========== 测试 ==========
   test:
     desc: 运行单元测试
     cmds:
-      - unset GOROOT && go test -v ./...
-
-  test-cover:
-    desc: 运行单元测试并输出覆盖率
-    cmds:
-      - unset GOROOT && go test -v -coverprofile=coverage.out ./...
-      - unset GOROOT && go tool cover -html=coverage.out -o coverage.html
-
-  test-cover-report:
-    desc: 查看覆盖率报告
-    cmds:
-      - unset GOROOT && go tool cover -func=coverage.out
-
-  test-race:
-    desc: 运行单元测试并检测竞态条件
-    cmds:
-      - unset GOROOT && go test -race -v ./...
+      - go test -v ./...
 
   e2e:
     desc: 运行端到端测试
     cmds:
-      - unset GOROOT && go test -v -tags=e2e -run E2E ./...
+      - go test -v -tags=e2e -run E2E ./...
 
   # ========== 构建 ==========
+  version:
+    desc: 查看版本信息
+    cmds:
+      - go run ./cmd/modu version
+
   build:
     desc: 构建项目
     cmds:
-      - unset GOROOT && go build -o bin/modu ./cmd/...
+      - go build -o bin/modu ./cmd/...
 
   build-all:
     desc: 构建所有平台版本
     cmds:
-      - unset GOROOT && GOOS=darwin GOARCH=amd64 go build -o bin/modu-darwin-amd64 ./cmd/...
-      - unset GOROOT && GOOS=darwin GOARCH=arm64 go build -o bin/modu-darwin-arm64 ./cmd/...
-      - unset GOROOT && GOOS=linux GOARCH=amd64 go build -o bin/modu-linux-amd64 ./cmd/...
+      - GOOS=darwin GOARCH=amd64 go build -o bin/modu-darwin-amd64 ./cmd/...
+      - GOOS=darwin GOARCH=arm64 go build -o bin/modu-darwin-arm64 ./cmd/...
+      - GOOS=linux GOARCH=amd64 go build -o bin/modu-linux-amd64 ./cmd/...
+
+  # ========== standard-version ==========
+
+  # 安装依赖（全局安装）
+  install-deps:
+    desc: 全局安装 standard-version
+    cmds:
+      - npm install -g standard-version
+
+  # 发布新版本（自动根据 commit message 判断版本类型）
+  # 仅限 master/main 分支执行
+  # feat: → minor | fix: → patch | BREAKING CHANGE: → major
+  # 程序启动时自动从 git tag 读取版本
+  release:
+    silent: true
+    desc: 自动根据 commit message 发布新版本（仅限 master/main）
+    cmds:
+      - |
+        BRANCH=$(git branch --show-current)
+        if [[ "$BRANCH" != "master" && "$BRANCH" != "main" ]]; then
+          echo "Error: Release must be run on master or main branch"
+          echo "Current branch: $BRANCH"
+          exit 1
+        fi
+
+        # 执行 standard-version 并创建 tag
+        standard-version
+
+  # 查看当前版本
+  version:dry-run:
+    desc: 查看当前版本
+    cmds:
+      - standard-version --dry-run
 
   # ========== Pre-commit ==========
   pre-commit:

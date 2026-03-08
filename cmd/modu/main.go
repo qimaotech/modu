@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"codeup.aliyun.com/qimao/public/devops/modu/internal/config"
@@ -14,6 +17,45 @@ import (
 
 	"github.com/spf13/cobra"
 )
+
+// 版本信息，运行时从 git 自动获取
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+)
+
+func init() {
+	ctx := context.Background()
+	// 启动时自动从 git 获取版本信息
+	if v, err := gitDescribe(ctx); err == nil {
+		version = v
+	}
+	if c, err := gitCommit(ctx); err == nil {
+		commit = c
+	}
+	if d, err := gitDate(ctx); err == nil {
+		date = d
+	}
+}
+
+func gitDescribe(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "describe", "--tags", "--abbrev=0").Output()
+	if err != nil {
+		return "dev", fmt.Errorf("git describe: %w", err)
+	}
+	return strings.TrimPrefix(strings.TrimSpace(string(out)), "v"), nil
+}
+
+func gitCommit(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--short", "HEAD").Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+func gitDate(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "log", "-1", "--format=%ci").Output()
+	return strings.TrimSpace(string(out)), err
+}
 
 // isInteractiveTerminal 检查是否是交互式终端
 func isInteractiveTerminal() bool {
@@ -125,6 +167,13 @@ func main() {
 	}
 	initCmd.Flags().Bool("scan", false, "自动扫描并添加模块")
 
+	// version 命令
+	versionCmd := &cobra.Command{
+		Use:   "version",
+		Short: "显示版本信息",
+		Run:   runVersion,
+	}
+
 	// status 命令
 	statusCmd := &cobra.Command{
 		Use:   "status",
@@ -154,7 +203,7 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(createCmd, deleteCmd, listCmd, infoCmd, configCmd, initCmd, statusCmd, tuiCmd)
+	rootCmd.AddCommand(createCmd, deleteCmd, listCmd, infoCmd, configCmd, initCmd, statusCmd, tuiCmd, versionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -480,6 +529,13 @@ func runInit(cmd *cobra.Command, args []string) {
 			fmt.Fprintf(os.Stderr, "警告: 更新 .gitignore 失败: %v\n", err)
 		}
 	}
+}
+
+func runVersion(cmd *cobra.Command, args []string) {
+	fmt.Printf("modu version %s\n", version)
+	fmt.Printf("  commit: %s\n", commit)
+	fmt.Printf("  date: %s\n", date)
+	fmt.Printf("  go: %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
 func runStatus(cmd *cobra.Command, args []string) {
