@@ -181,6 +181,15 @@ func main() {
 		Run:   runStatus,
 	}
 
+	// update 命令 - 更新主项目或指定 feature 的 worktree
+	updateCmd := &cobra.Command{
+		Use:   "update [feature]",
+		Short: "更新代码（主项目或指定 feature 的 worktree，fetch + rebase）",
+		Long:  "无参数时更新主项目（workspace + 所有模块）；带 feature 时更新该 feature 的 worktree。",
+		Args:  cobra.MaximumNArgs(1),
+		Run:   runUpdate,
+	}
+
 	// tui 命令（显式启动 TUI）
 	tuiCmd := &cobra.Command{
 		Use:   "tui",
@@ -203,7 +212,7 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(createCmd, deleteCmd, listCmd, infoCmd, configCmd, initCmd, statusCmd, tuiCmd, versionCmd)
+	rootCmd.AddCommand(createCmd, deleteCmd, listCmd, infoCmd, configCmd, initCmd, statusCmd, updateCmd, tuiCmd, versionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -282,13 +291,17 @@ func runCreate(cmd *cobra.Command, args []string) {
 	if len(modules) == 0 {
 		if isInteractiveTerminal() {
 			// 交互式终端：使用 TUI 选择
-			selectedModules, err := ui.SelectModules(eng.Config.Modules, existingModules)
+			selectedModules, isQuit, err := ui.SelectModules(eng.Config.Modules, existingModules)
 			if err != nil {
 				// TUI 不可用时回退到非交互模式
 				fmt.Fprintf(os.Stderr, "TUI 不可用: %v\n", err)
+			} else if isQuit {
+				// 用户按 q/ctrl+c 退出，保留已存在的模块，不执行任何操作
+				fmt.Println("已取消操作，保留所有已存在的模块")
+				return
 			} else if len(selectedModules) == 0 && len(existingModules) > 0 {
-				// 用户没有选择任何模块，只删除不创建
-				fmt.Println("未选择任何模块，将删除所有已存在的模块")
+				// 用户按回车但没有选择任何模块，只删除不创建
+				fmt.Println("未选择任何模块，将删除所有已存在的模块（如需保留请按 q 退出）")
 				deleteOnly = true
 			} else {
 				eng.Config.Modules = selectedModules
@@ -549,6 +562,51 @@ func runStatus(cmd *cobra.Command, args []string) {
 	}
 
 	fmt.Print(formatter.FormatListResponse(envs))
+}
+
+func runUpdate(cmd *cobra.Command, args []string) {
+	eng := loadConfig()
+
+	if len(args) == 0 {
+		success, failed := eng.UpdateMainProject(cmd.Context())
+		printUpdateResult("", success, failed)
+		if len(failed) > 0 {
+			os.Exit(1)
+		}
+		return
+	}
+
+	feature := args[0]
+	featurePath := filepath.Join(eng.Config.WorktreeRoot, feature)
+	if _, err := os.Stat(featurePath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "feature %s 不存在: %s\n", feature, featurePath)
+		os.Exit(1)
+	}
+	success, failed := eng.UpdateWorktree(cmd.Context(), feature)
+	printUpdateResult(feature, success, failed)
+	if len(failed) > 0 {
+		os.Exit(1)
+	}
+}
+
+func printUpdateResult(feature string, success int, failed map[string]error) {
+	if len(failed) == 0 {
+		if feature == "" {
+			if success == 1 {
+				fmt.Println("更新成功: 主项目")
+			} else {
+				fmt.Printf("更新成功: 主项目 + %d 个模块\n", success-1)
+			}
+		} else {
+			fmt.Printf("更新成功: feature %s（主项目 + %d 个模块）\n", feature, success-1)
+		}
+		return
+	}
+	names := make([]string, 0, len(failed))
+	for name := range failed {
+		names = append(names, name)
+	}
+	fmt.Printf("更新成功: %d 个，失败: %d 个 (%s)\n", success, len(failed), strings.Join(names, ", "))
 }
 
 // runConfigCreate 运行配置创建命令

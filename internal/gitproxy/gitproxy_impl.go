@@ -46,6 +46,22 @@ func (g *GitProxy) CreateWorktree(ctx context.Context, repoPath, branch, baseBra
 	return nil
 }
 
+// CreateWorktreeFromExistingBranch 从现有分支创建 worktree（不创建新分支）
+func (g *GitProxy) CreateWorktreeFromExistingBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
+	// 先 fetch 获取最新
+	if err := g.Fetch(ctx, repoPath); err != nil {
+		return err
+	}
+
+	// 从现有分支创建 worktree（不带 -b 参数）
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "add", worktreePath, branch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("[git worktree add] failed to create worktree from branch %s at %s: %w, output: %s", branch, worktreePath, errors.ErrGitExec, string(out))
+	}
+	return nil
+}
+
 // GetStatus 获取目录状态
 func (g *GitProxy) GetStatus(ctx context.Context, path string) (Status, error) {
 	// 检查目录是否存在
@@ -138,10 +154,48 @@ func (g *GitProxy) Fetch(ctx context.Context, repoPath string) error {
 	return nil
 }
 
+// Rebase 在当前路径下执行 fetch 后 rebase origin/<当前分支>
+func (g *GitProxy) Rebase(ctx context.Context, path string) error {
+	// fetch 在 path 对应的仓库
+	if err := g.Fetch(ctx, path); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD")
+	branchOut, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("[git rev-parse] failed to get branch in %s: %w", path, err)
+	}
+	branch := strings.TrimSpace(string(branchOut))
+	if branch == "" || branch == "HEAD" {
+		return fmt.Errorf("[rebase] detached HEAD in %s", path)
+	}
+	rebaseCmd := exec.CommandContext(ctx, "git", "-C", path, "rebase", "origin/"+branch)
+	out, err := rebaseCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("[git rebase] failed in %s: %w, output: %s", path, errors.ErrGitExec, string(out))
+	}
+	return nil
+}
+
 // BranchExists 检查分支是否存在
 func (g *GitProxy) BranchExists(ctx context.Context, repoPath, branch string) bool {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "--verify", branch)
 	return cmd.Run() == nil
+}
+
+// CheckBranchWorktreeStatus 检查分支是否已被 worktree 使用
+func (g *GitProxy) CheckBranchWorktreeStatus(ctx context.Context, repoPath, branch string) (bool, error) {
+	worktrees, err := g.ListWorktrees(ctx, repoPath)
+	if err != nil {
+		return false, fmt.Errorf("failed to list worktrees: %w", err)
+	}
+
+	for _, wt := range worktrees {
+		if wt.Branch == branch {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // parseStatus 解析 git status --porcelain 输出

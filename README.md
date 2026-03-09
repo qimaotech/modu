@@ -105,6 +105,15 @@ modu list -o json
 modu
 modu tui
 
+### TUI 快捷键
+
+| 按键   | 说明                   |
+| ------ | ---------------------- |
+| ↑/↓    | 上下选择 feature       |
+| Enter  | 确认删除选中 feature   |
+| o      | 用 VS Code 打开主项目 |
+| q/esc  | 退出 TUI              |
+
 # 创建配置文件
 modu config create
 modu config create --module "frontend=https://codeup.aliyun.com/example/frontend.git"
@@ -144,7 +153,3 @@ goreleaser build --clean
 - Go 1.25+
 - [Cobra](https://github.com/spf13/cobra) - CLI 框架
 - [Bubble Tea](https://github.com/charmbracelet/bubbletea) - TUI 框架
-
-## 许可证
-
-MIT License

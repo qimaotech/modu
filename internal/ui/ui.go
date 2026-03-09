@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -35,15 +36,60 @@ var (
 			Foreground(lipgloss.Color("82"))
 )
 
+// ListEntry 列表项统一接口（主项目或 feature）
+type ListEntry interface {
+	IsMainProject() bool
+	GetName() string
+	GetDirtyCount() int
+}
+
+// MainProjectEntry 主项目列表项
+type MainProjectEntry struct {
+	*engine.MainProjectStatus
+}
+
+func (e *MainProjectEntry) IsMainProject() bool { return true }
+func (e *MainProjectEntry) GetName() string     { return e.MainProjectStatus.Name }
+func (e *MainProjectEntry) GetDirtyCount() int {
+	if e.MainProjectStatus.IsDirty {
+		return 1
+	}
+	return 0
+}
+
+// FeatureEntry 包装 WorktreeEnv 实现 ListEntry
+type FeatureEntry struct {
+	*core.WorktreeEnv
+}
+
+func (e *FeatureEntry) IsMainProject() bool { return false }
+func (e *FeatureEntry) GetName() string     { return e.WorktreeEnv.Name }
+func (e *FeatureEntry) GetDirtyCount() int {
+	n := 0
+	for _, m := range e.WorktreeEnv.Modules {
+		if m.IsDirty {
+			n++
+		}
+	}
+	return n
+}
+
 // TUI App 状态
 type App struct {
-	Engine   *engine.Engine
-	Envs     []core.WorktreeEnv
-	selected int
-	state    string // "loading", "list", "confirm", "error"
-	feature  string
-	err      error
-	message  string
+	Engine       *engine.Engine
+	Envs         []core.WorktreeEnv
+	mainProject  *engine.MainProjectStatus
+	selected     int
+	menuSelected int    // 操作菜单选中项: 0=打开VSCode, 1=Modules管理, 2=删除
+	state        string // "loading", "list", "menu", "modules", "confirm", "error"
+	feature      string
+	err          error
+	message      string
+	// 模块管理相关字段
+	moduleSelector    *ModuleSelector // 模块选择器
+	moduleCursor      int             // 模块列表光标位置
+	modulesFeature    string          // 当前操作的 feature 名称
+	isMainProjectMenu bool            // 当前菜单是否为主项目菜单
 }
 
 // New 创建 TUI App
@@ -64,12 +110,24 @@ func (m *App) loadEnvs() tea.Msg {
 	if err != nil {
 		return errorMsg{err}
 	}
-	return loadedMsg{envs}
+	main, _ := m.Engine.GetMainProject(context.Background())
+	return loadedMsg{envs: envs, mainProject: main}
 }
 
 type loadedMsg struct {
-	envs []core.WorktreeEnv
+	envs        []core.WorktreeEnv
+	mainProject *engine.MainProjectStatus
 }
+
+// updateDoneMsg 更新代码完成；feature 非空表示本次为 feature worktree 更新
+type updateDoneMsg struct {
+	success int
+	failed  map[string]error
+	feature string
+}
+
+// refreshListMsg 请求重新加载列表（如模块变更后）
+type refreshListMsg struct{}
 
 type errorMsg struct {
 	err error
@@ -79,7 +137,29 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case loadedMsg:
 		m.Envs = msg.envs
+		m.mainProject = msg.mainProject
 		m.state = "list"
+	case updateDoneMsg:
+		if len(msg.failed) == 0 {
+			if msg.feature != "" {
+				m.message = fmt.Sprintf("更新成功: feature %s（主项目 + %d 个模块）", msg.feature, msg.success-1)
+			} else if msg.success == 1 {
+				m.message = "更新成功: 主项目"
+			} else {
+				m.message = fmt.Sprintf("更新成功: 主项目 + %d 个模块", msg.success-1)
+			}
+		} else {
+			names := make([]string, 0, len(msg.failed))
+			for name := range msg.failed {
+				names = append(names, name)
+			}
+			m.message = fmt.Sprintf("更新成功: %d 个，失败: %d 个 (%s)", msg.success, len(msg.failed), strings.Join(names, ", "))
+		}
+		m.state = "loading"
+		return m, m.loadEnvs
+	case refreshListMsg:
+		m.state = "loading"
+		return m, m.loadEnvs
 	case errorMsg:
 		m.err = msg.err
 		m.state = "error"
@@ -87,32 +167,96 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.state {
 		case "list":
 			return m.handleListKey(msg)
+		case "menu":
+			return m.handleMenuKey(msg)
+		case "modules":
+			return m.handleModulesKey(msg)
 		case "confirm":
 			return m.handleConfirmKey(msg)
+		case "error":
+			m.state = "list"
+			m.err = nil
 		}
 	}
 	return m, nil
 }
 
 func (m *App) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	total := m.listEntryCount()
 	switch msg.String() {
 	case "up", "k":
 		if m.selected > 0 {
 			m.selected--
 		}
 	case "down", "j":
-		if m.selected < len(m.Envs)-1 {
+		if m.selected < total-1 {
 			m.selected++
 		}
 	case "enter":
-		if len(m.Envs) > 0 {
+		if total > 0 {
+			m.state = "menu"
+			m.menuSelected = 0
+			m.isMainProjectMenu = m.selectedListEntry() != nil && m.selectedListEntry().IsMainProject()
+		}
+	case "d":
+		entry := m.selectedListEntry()
+		if entry != nil && !entry.IsMainProject() {
 			m.state = "confirm"
-			m.feature = m.Envs[m.selected].Name
+			m.feature = entry.GetName()
+		}
+	case "o":
+		if entry := m.selectedListEntry(); entry != nil {
+			if entry.IsMainProject() {
+				path := m.mainProject.Path
+				cmd := exec.Command("code", path)
+				_ = cmd.Start()
+			} else {
+				env := m.selectedFeatureEnv()
+				if env != nil && env.MainProject != nil {
+					cmd := exec.Command("code", env.MainProject.Path)
+					_ = cmd.Start()
+				} else {
+					m.err = fmt.Errorf("该 feature 无主项目，无法打开")
+					m.state = "error"
+				}
+			}
+		}
+	case "m":
+		if env := m.selectedFeatureEnv(); env != nil {
+			m.initModuleSelector()
+			m.state = "modules"
+		}
+	case "u":
+		if entry := m.selectedListEntry(); entry != nil {
+			if entry.IsMainProject() {
+				m.state = "loading"
+				return m, m.executeUpdateCode()
+			}
+			m.state = "loading"
+			return m, m.executeUpdateWorktree(entry.GetName())
 		}
 	case "q", "esc":
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+// selectedFeatureEnv 当前选中的 feature 环境（仅当选中 feature 时有效）
+func (m *App) selectedFeatureEnv() *core.WorktreeEnv {
+	if m.mainProject != nil {
+		if m.selected <= 0 {
+			return nil
+		}
+		idx := m.selected - 1
+		if idx < len(m.Envs) {
+			return &m.Envs[idx]
+		}
+		return nil
+	}
+	if m.selected < len(m.Envs) {
+		return &m.Envs[m.selected]
+	}
+	return nil
 }
 
 func (m *App) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -134,12 +278,229 @@ func (m *App) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// initModuleSelector 初始化模块选择器
+func (m *App) initModuleSelector() {
+	env := m.selectedFeatureEnv()
+	if env == nil {
+		return
+	}
+	m.modulesFeature = env.Name
+
+	existingModules := make([]string, len(env.Modules))
+	for i, mod := range env.Modules {
+		existingModules[i] = mod.Name
+	}
+
+	// 创建模块选择器，预先选中已存在的模块
+	m.moduleSelector = NewModuleSelector(m.Engine.Config.Modules, existingModules)
+	m.moduleCursor = 0
+}
+
+func (m *App) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	menuLen := 2
+	if !m.isMainProjectMenu {
+		menuLen = 4
+	}
+	switch msg.String() {
+	case "up", "k":
+		if m.menuSelected > 0 {
+			m.menuSelected--
+		}
+	case "down", "j":
+		if m.menuSelected < menuLen-1 {
+			m.menuSelected++
+		}
+	case "enter":
+		if m.isMainProjectMenu {
+			switch m.menuSelected {
+			case 0:
+				if m.mainProject != nil {
+					cmd := exec.Command("code", m.mainProject.Path)
+					_ = cmd.Start()
+					m.state = "list"
+				}
+			case 1:
+				m.state = "loading"
+				return m, m.executeUpdateCode()
+			}
+		} else {
+			switch m.menuSelected {
+			case 0:
+				if env := m.selectedFeatureEnv(); env != nil && env.MainProject != nil {
+					cmd := exec.Command("code", env.MainProject.Path)
+					_ = cmd.Start()
+					m.state = "list"
+				} else {
+					m.err = fmt.Errorf("该 feature 无主项目，无法打开")
+					m.state = "error"
+				}
+			case 1:
+				if env := m.selectedFeatureEnv(); env != nil {
+					m.state = "loading"
+					return m, m.executeUpdateWorktree(env.Name)
+				}
+			case 2:
+				m.initModuleSelector()
+				m.state = "modules"
+			case 3:
+				if env := m.selectedFeatureEnv(); env != nil {
+					m.state = "confirm"
+					m.feature = env.Name
+				}
+			}
+		}
+	case "m":
+		if !m.isMainProjectMenu {
+			m.initModuleSelector()
+			m.state = "modules"
+		}
+	case "d":
+		if !m.isMainProjectMenu {
+			m.state = "confirm"
+			if env := m.selectedFeatureEnv(); env != nil {
+				m.feature = env.Name
+			}
+		}
+	case "o":
+		if m.isMainProjectMenu && m.mainProject != nil {
+			cmd := exec.Command("code", m.mainProject.Path)
+			_ = cmd.Start()
+			m.state = "list"
+		} else if env := m.selectedFeatureEnv(); env != nil && env.MainProject != nil {
+			cmd := exec.Command("code", env.MainProject.Path)
+			_ = cmd.Start()
+			m.state = "list"
+		} else if !m.isMainProjectMenu {
+			m.err = fmt.Errorf("该 feature 无主项目，无法打开")
+			m.state = "error"
+		}
+	case "u":
+		if m.isMainProjectMenu {
+			m.state = "loading"
+			return m, m.executeUpdateCode()
+		} else if env := m.selectedFeatureEnv(); env != nil {
+			m.state = "loading"
+			return m, m.executeUpdateWorktree(env.Name)
+		}
+	case "q", "esc":
+		m.state = "list"
+	}
+	return m, nil
+}
+
+func (m *App) handleModulesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.moduleCursor > 0 {
+			m.moduleCursor--
+		}
+	case "down", "j":
+		if m.moduleCursor < len(m.moduleSelector.modules)-1 {
+			m.moduleCursor++
+		}
+	case " ":
+		// 空格切换选中状态
+		if m.moduleCursor < len(m.moduleSelector.selected) {
+			m.moduleSelector.selected[m.moduleCursor] = !m.moduleSelector.selected[m.moduleCursor]
+		}
+	case "enter":
+		// 回车确认，执行模块增删
+		return m, m.executeModulesChange
+	case "q", "esc":
+		// 返回操作菜单
+		m.state = "menu"
+	}
+	return m, nil
+}
+
+// executeUpdateCode 执行主项目+模块更新，返回在后台运行并发送 updateDoneMsg 的 Cmd
+func (m *App) executeUpdateCode() tea.Cmd {
+	return func() tea.Msg {
+		success, failed := m.Engine.UpdateMainProject(context.Background())
+		return updateDoneMsg{success: success, failed: failed, feature: ""}
+	}
+}
+
+// executeUpdateWorktree 执行指定 feature 的 worktree 更新
+func (m *App) executeUpdateWorktree(feature string) tea.Cmd {
+	return func() tea.Msg {
+		success, failed := m.Engine.UpdateWorktree(context.Background(), feature)
+		return updateDoneMsg{success: success, failed: failed, feature: feature}
+	}
+}
+
+func (m *App) executeModulesChange() tea.Msg {
+	selectedModules := m.moduleSelector.SelectedModules()
+
+	var env *core.WorktreeEnv
+	for i := range m.Envs {
+		if m.Envs[i].Name == m.modulesFeature {
+			env = &m.Envs[i]
+			break
+		}
+	}
+	if env == nil {
+		return errorMsg{fmt.Errorf("未找到 feature: %s", m.modulesFeature)}
+	}
+	existingModules := make(map[string]bool)
+	for _, mod := range env.Modules {
+		existingModules[mod.Name] = true
+	}
+
+	// 分类：需要添加的和需要删除的
+	var toAdd []string
+	var toRemove []string
+
+	for _, mod := range selectedModules {
+		if !existingModules[mod.Name] {
+			toAdd = append(toAdd, mod.Name)
+		}
+	}
+
+	for _, mod := range env.Modules {
+		// 检查是否在选中列表中
+		found := false
+		for _, sel := range selectedModules {
+			if sel.Name == mod.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			toRemove = append(toRemove, mod.Name)
+		}
+	}
+
+	// 执行添加
+	for _, modName := range toAdd {
+		err := m.Engine.AddModule(context.Background(), m.modulesFeature, modName)
+		if err != nil {
+			return errorMsg{fmt.Errorf("添加模块 %s 失败: %w", modName, err)}
+		}
+	}
+
+	// 执行删除
+	for _, modName := range toRemove {
+		err := m.Engine.RemoveModule(context.Background(), m.modulesFeature, modName)
+		if err != nil {
+			return errorMsg{fmt.Errorf("删除模块 %s 失败: %w", modName, err)}
+		}
+	}
+
+	m.message = fmt.Sprintf("模块已更新: 添加 %d, 删除 %d", len(toAdd), len(toRemove))
+	return refreshListMsg{}
+}
+
 func (m *App) View() string {
 	switch m.state {
 	case "loading":
 		return "Loading..."
 	case "list":
 		return m.renderList()
+	case "menu":
+		return m.renderMenu()
+	case "modules":
+		return m.renderModules()
 	case "confirm":
 		return m.renderConfirm()
 	case "error":
@@ -149,19 +510,61 @@ func (m *App) View() string {
 	}
 }
 
+// listEntryCount 列表总条数（主项目 + features）
+func (m *App) listEntryCount() int {
+	n := len(m.Envs)
+	if m.mainProject != nil {
+		n++
+	}
+	return n
+}
+
+// selectedListEntry 当前选中的列表项，可能为主项目或 feature
+func (m *App) selectedListEntry() ListEntry {
+	if m.mainProject != nil {
+		if m.selected == 0 {
+			return &MainProjectEntry{m.mainProject}
+		}
+		idx := m.selected - 1
+		if idx < len(m.Envs) {
+			return &FeatureEntry{&m.Envs[idx]}
+		}
+	} else if m.selected < len(m.Envs) {
+		return &FeatureEntry{&m.Envs[m.selected]}
+	}
+	return nil
+}
+
 func (m *App) renderList() string {
 	var s strings.Builder
 	s.WriteString(headerStyle.Render("modu - Worktree Manager"))
 	s.WriteString("\n\n")
-	s.WriteString(itemStyle.Render("Use arrow keys to navigate, Enter to select, q to quit"))
+	s.WriteString(itemStyle.Render("↑/↓ 选择，Enter 回车选择，m 管理模块(仅 feature 有效)，d 删除，o 打开 VS Code，q/esc 退出"))
 	s.WriteString("\n\n")
 
-	if len(m.Envs) == 0 {
+	total := m.listEntryCount()
+	if total == 0 {
 		s.WriteString(itemStyle.Render("No features found. Use CLI to create one: modu create <feature>"))
 		return s.String()
 	}
 
-	for i, env := range m.Envs {
+	row := 0
+	if m.mainProject != nil {
+		status := successStyle.Render("clean")
+		if m.mainProject.IsDirty {
+			status = errorStyle.Render("dirty")
+		}
+		line := fmt.Sprintf("→ %s [主项目] (%s) [%s]", m.mainProject.Name, status, m.mainProject.Branch)
+		if m.selected == 0 {
+			s.WriteString(selectedItemStyle.Render(line))
+		} else {
+			s.WriteString(itemStyle.Render(line))
+		}
+		s.WriteString("\n")
+		row++
+	}
+	for i := range m.Envs {
+		env := &m.Envs[i]
 		dirtyCount := 0
 		for _, mod := range env.Modules {
 			if mod.IsDirty {
@@ -172,13 +575,18 @@ func (m *App) renderList() string {
 		if dirtyCount > 0 {
 			status = errorStyle.Render(fmt.Sprintf("%d dirty", dirtyCount))
 		}
-
-		if i == m.selected {
-			s.WriteString(selectedItemStyle.Render(fmt.Sprintf("→ %s (%s)", env.Name, status)))
+		prefix := "  "
+		if m.selected == row {
+			prefix = "→ "
+		}
+		line := fmt.Sprintf("%s%s (%s)", prefix, env.Name, status)
+		if m.selected == row {
+			s.WriteString(selectedItemStyle.Render(line))
 		} else {
-			s.WriteString(itemStyle.Render(fmt.Sprintf("  %s (%s)", env.Name, status)))
+			s.WriteString(itemStyle.Render(line))
 		}
 		s.WriteString("\n")
+		row++
 	}
 
 	if m.message != "" {
@@ -197,6 +605,79 @@ func (m *App) renderConfirm() string {
 	s.WriteString(fmt.Sprintf("Are you sure you want to delete feature: %s?\n", m.feature))
 	s.WriteString(itemStyle.Render("Press 'y' to confirm, 'n' to cancel"))
 	s.WriteString("\n\n")
+	return s.String()
+}
+
+func (m *App) renderMenu() string {
+	var s strings.Builder
+	s.WriteString(headerStyle.Render("操作菜单"))
+	s.WriteString("\n\n")
+
+	if m.isMainProjectMenu && m.mainProject != nil {
+		s.WriteString(fmt.Sprintf("当前选中: %s [主项目] (<dirty状态>)\n\n", m.mainProject.Name))
+		menuItems := []string{"打开 VS Code (o)", "更新代码 (u)"}
+		for i, item := range menuItems {
+			if i == m.menuSelected {
+				s.WriteString(selectedItemStyle.Render(fmt.Sprintf("→ %s", item)))
+			} else {
+				s.WriteString(itemStyle.Render(fmt.Sprintf("  %s", item)))
+			}
+			s.WriteString("\n")
+		}
+	} else {
+		if env := m.selectedFeatureEnv(); env != nil {
+			s.WriteString(fmt.Sprintf("当前选中: %s\n\n", env.Name))
+		}
+		menuItems := []string{"打开 VS Code (o)", "更新代码 (u)", "Modules 管理 (m)", "删除 (d)"}
+		for i, item := range menuItems {
+			if i == m.menuSelected {
+				s.WriteString(selectedItemStyle.Render(fmt.Sprintf("→ %s", item)))
+			} else {
+				s.WriteString(itemStyle.Render(fmt.Sprintf("  %s", item)))
+			}
+			s.WriteString("\n")
+		}
+	}
+	s.WriteString("\n")
+	s.WriteString(itemStyle.Render("按 ↑/↓ 选择，Enter 执行，esc 返回"))
+	return s.String()
+}
+
+func (m *App) renderModules() string {
+	var s strings.Builder
+	s.WriteString(headerStyle.Render("模块管理"))
+	s.WriteString("\n\n")
+
+	// 显示当前操作的 feature
+	s.WriteString(fmt.Sprintf("当前 feature: %s\n\n", m.modulesFeature))
+
+	if m.moduleSelector == nil {
+		s.WriteString(itemStyle.Render("加载中..."))
+		return s.String()
+	}
+
+	// 显示所有模块
+	for i, module := range m.moduleSelector.modules {
+		cursor := " "
+		if m.moduleCursor == i {
+			cursor = ">"
+		}
+
+		checkbox := "[ ]"
+		if m.moduleSelector.selected[i] {
+			checkbox = "[x]"
+		}
+
+		if m.moduleCursor == i {
+			s.WriteString(selectedItemStyle.Render(fmt.Sprintf("%s %s %s", cursor, checkbox, module.Name)))
+		} else {
+			s.WriteString(itemStyle.Render(fmt.Sprintf("%s %s %s", cursor, checkbox, module.Name)))
+		}
+		s.WriteString("\n")
+	}
+
+	s.WriteString("\n")
+	s.WriteString(itemStyle.Render("空格切换选择，Enter 确认，q/esc 返回"))
 	return s.String()
 }
 
@@ -230,20 +711,21 @@ func StartTUI(configPath string) error {
 
 // SelectModules 让用户选择模块（空格选中，上下键切换，回车确认）
 // existingModules: 已存在的模块列表，这些模块会被预先选中
-func SelectModules(modules []config.Module, existingModules []string) ([]config.Module, error) {
+// 返回: 选中的模块列表, 用户是否按 q/ctrl+c 退出
+func SelectModules(modules []config.Module, existingModules []string) ([]config.Module, bool, error) {
 	if len(modules) == 0 {
-		return modules, nil
+		return modules, false, nil
 	}
 
 	p := tea.NewProgram(NewModuleSelector(modules, existingModules))
 	result, runErr := p.Run()
 	if runErr != nil {
-		return nil, fmt.Errorf("failed to run module selector: %w", runErr)
+		return nil, false, fmt.Errorf("failed to run module selector: %w", runErr)
 	}
 
 	// 类型断言一定会成功，因为 Program 已经成功返回
 	selector, _ := result.(*ModuleSelector)
-	return selector.SelectedModules(), nil
+	return selector.SelectedModules(), selector.quitting, nil
 }
 
 // ModuleSelector 模块选择器

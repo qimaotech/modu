@@ -20,8 +20,14 @@ type GitClient interface {
 	ListWorktrees(ctx context.Context, repoPath string) ([]WorktreeInfo, error)
 	// Fetch 从远程获取最新
 	Fetch(ctx context.Context, repoPath string) error
+	// Rebase 在当前路径下执行 git rebase origin/<当前分支>
+	Rebase(ctx context.Context, path string) error
 	// BranchExists 检查分支是否存在
 	BranchExists(ctx context.Context, repoPath, branch string) bool
+	// CheckBranchWorktreeStatus 检查分支是否已被 worktree 使用
+	CheckBranchWorktreeStatus(ctx context.Context, repoPath, branch string) (bool, error)
+	// CreateWorktreeFromExistingBranch 从现有分支创建 worktree（不创建新分支）
+	CreateWorktreeFromExistingBranch(ctx context.Context, repoPath, branch, worktreePath string) error
 }
 
 // Status Git 状态
