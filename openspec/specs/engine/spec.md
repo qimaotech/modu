@@ -11,6 +11,7 @@
 - 并发调度：使用 `golang.org/x/sync/errgroup`，限流为 `Config.Concurrency`。
 - 事务性创建：Create 失败时回滚已创建的 worktree 目录。
 - 脏检查：Delete 前（除非 `--force`）检查各模块是否存在未提交修改。
+- **模块认定**：凡涉及「模块」的 list/create/delete 逻辑，仅处理 `Config.Modules` 中的目录；feature 下的其他子目录（如 `.claude`、`openspec` 等）一律忽略，不展示、不参与增删、不参与脏检查。
 
 ## CreateWorktree（事务性并发创建）
 
@@ -21,8 +22,8 @@
 ## DeleteWorktree
 
 1. 若 feature 目录不存在，返回 `ERR_FEATURE_NOT_FOUND`。
-2. 若未使用 `--force` 且 `Config.StrictDirty` 为 true：构建 `WorktreeEnv`（遍历 feature 下子目录），调用 **CheckDirty**；若有 dirty 模块，返回 `ERR_DIRTY_WORKTREE`。
-3. 依次删除各模块 worktree（`RemoveWorktreeAndBranch`），再删除主项目 worktree，最后 `os.RemoveAll(featurePath)`。
+2. 若未使用 `--force` 且 `Config.StrictDirty` 为 true：构建 `WorktreeEnv` 时仅包含 **配置内模块** 子目录，调用 **CheckDirty**；若有 dirty 模块，返回 `ERR_DIRTY_WORKTREE`。
+3. 仅对 **配置内模块** 依次执行 `RemoveWorktreeAndBranch`，再删除主项目 worktree，最后 `os.RemoveAll(featurePath)`。不对非配置目录单独调用 RemoveWorktreeAndBranch。
 
 ## CheckDirty
 
@@ -33,7 +34,7 @@
 ## ListWorktrees
 
 - 扫描 `worktree-root` 下子目录，每个子目录名视为 feature 名。
-- 对每个 feature 收集其下模块目录，构造 `WorktreeEnv`（Name、Base、Modules）；模块的 Branch/IsDirty 通过 gitproxy GetStatus 获取。
+- 对每个 feature 仅收集 **配置内模块**（名称在 `Config.Modules` 中且存在的子目录），构造 `WorktreeEnv`（Name、Base、Modules）；模块的 Branch/IsDirty 通过 gitproxy GetStatus 获取。非配置目录（如 `.claude`、`openspec`）不列入 Modules。
 
 ## 命令与 Git 原语映射
 

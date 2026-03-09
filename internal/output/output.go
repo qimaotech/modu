@@ -120,11 +120,11 @@ func (f *Formatter) FormatDeleteResponse(feature string, errs []error) string {
 	// 文本格式
 	var sb strings.Builder
 	if len(errs) == 0 {
-		sb.WriteString(fmt.Sprintf("✓ Successfully deleted feature: %s\n", feature))
+		sb.WriteString(fmt.Sprintf("✓ 已删除 feature: %s\n", feature))
 	} else {
-		sb.WriteString(fmt.Sprintf("✗ Failed to delete feature: %s\n", feature))
+		sb.WriteString(fmt.Sprintf("✗ 删除 feature 失败: %s\n", feature))
 		for _, e := range errs {
-			sb.WriteString(fmt.Sprintf("  Error: %s\n", e.Error()))
+			sb.WriteString(fmt.Sprintf("  错误: %s\n", e.Error()))
 		}
 	}
 

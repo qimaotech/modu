@@ -277,8 +277,9 @@ func (e *Engine) DeleteWorktree(ctx context.Context, feature string, force bool)
 		if err != nil {
 			return fmt.Errorf("failed to read feature directory: %w", err)
 		}
+		configuredNames := e.configuredModuleNames()
 		for _, entry := range entries {
-			if !entry.IsDir() {
+			if !entry.IsDir() || !configuredNames[entry.Name()] {
 				continue
 			}
 			modulePath := filepath.Join(featurePath, entry.Name())
@@ -550,7 +551,8 @@ func (e *Engine) ListWorktrees(ctx context.Context) ([]core.WorktreeEnv, error) 
 			}
 		}
 
-		// 处理所有子目录（模块）
+		// 只把配置中的模块加入列表，避免 .claude、openspec 等非模块目录被当作模块展示
+		configuredNames := e.configuredModuleNames()
 		for _, me := range moduleEntries {
 			if !me.IsDir() {
 				continue
@@ -559,6 +561,9 @@ func (e *Engine) ListWorktrees(ctx context.Context) ([]core.WorktreeEnv, error) 
 
 			// 跳过主项目目录（已处理）
 			if me.Name() == mainProjectName {
+				continue
+			}
+			if !configuredNames[me.Name()] {
 				continue
 			}
 
@@ -619,12 +624,16 @@ func (e *Engine) GetWorktreeInfo(ctx context.Context, feature string) (*core.Wor
 	if err != nil {
 		return nil, fmt.Errorf("failed to read feature directory %s: %w", featurePath, err)
 	}
+	configuredNames := e.configuredModuleNames()
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		// 跳过主项目目录（兼容旧结构）
 		if entry.Name() == mainProjectName {
+			continue
+		}
+		if !configuredNames[entry.Name()] {
 			continue
 		}
 		modulePath := filepath.Join(featurePath, entry.Name())
@@ -646,6 +655,15 @@ func (e *Engine) GetWorktreeInfo(ctx context.Context, feature string) (*core.Wor
 	}
 
 	return env, nil
+}
+
+// configuredModuleNames 返回配置中模块名称集合，用于区分「配置内模块」与普通目录（如 .claude、openspec）
+func (e *Engine) configuredModuleNames() map[string]bool {
+	out := make(map[string]bool, len(e.Config.Modules))
+	for _, m := range e.Config.Modules {
+		out[m.Name] = true
+	}
+	return out
 }
 
 // AddModule 为 feature 添加单个模块的 worktree

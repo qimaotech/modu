@@ -267,7 +267,7 @@ func (m *App) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = err
 			m.state = "error"
 		} else {
-			m.message = "Deleted feature: " + m.feature
+			m.message = "已删除 feature: " + m.feature
 			m.state = "loading"
 			m.selected = 0
 			return m, m.loadEnvs
@@ -600,10 +600,10 @@ func (m *App) renderList() string {
 
 func (m *App) renderConfirm() string {
 	var s strings.Builder
-	s.WriteString(headerStyle.Render("Confirm Delete"))
+	s.WriteString(headerStyle.Render("确认删除"))
 	s.WriteString("\n\n")
-	s.WriteString(fmt.Sprintf("Are you sure you want to delete feature: %s?\n", m.feature))
-	s.WriteString(itemStyle.Render("Press 'y' to confirm, 'n' to cancel"))
+	s.WriteString(fmt.Sprintf("确定要删除 feature「%s」吗？\n", m.feature))
+	s.WriteString(itemStyle.Render("按 y 确认，n 取消"))
 	s.WriteString("\n\n")
 	return s.String()
 }
@@ -683,11 +683,11 @@ func (m *App) renderModules() string {
 
 func (m *App) renderError() string {
 	var s strings.Builder
-	s.WriteString(headerStyle.Render("Error"))
+	s.WriteString(headerStyle.Render("错误"))
 	s.WriteString("\n\n")
 	s.WriteString(errorStyle.Render(fmt.Sprintf("%v", m.err)))
 	s.WriteString("\n\n")
-	s.WriteString(itemStyle.Render("Press any key to continue..."))
+	s.WriteString(itemStyle.Render("按任意键继续..."))
 	return s.String()
 }
 

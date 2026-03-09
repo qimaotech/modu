@@ -99,7 +99,7 @@ func TestFormatDeleteResponse_Text_Success(t *testing.T) {
 
 	output := formatter.FormatDeleteResponse("feature-test", nil)
 
-	if !contains(output, "Successfully deleted feature: feature-test") {
+	if !contains(output, "已删除 feature: feature-test") {
 		t.Error("expected success message")
 	}
 }
@@ -110,7 +110,7 @@ func TestFormatDeleteResponse_Text_Failure(t *testing.T) {
 
 	output := formatter.FormatDeleteResponse("feature-test", []error{errTest})
 
-	if !contains(output, "Failed to delete feature: feature-test") {
+	if !contains(output, "删除 feature 失败: feature-test") {
 		t.Error("expected failure message")
 	}
 }

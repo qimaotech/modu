@@ -10,14 +10,14 @@
 
 ### WorktreeEnv
 
-表示一个 feature 环境，包含该环境下各模块的工作树状态。
+表示一个 feature 环境，包含该环境下各模块的工作树状态。**Modules 仅包含配置内模块**（`Config.Modules` 中列出的目录），feature 下的其他子目录（如 `.claude`、`openspec`）不在此列表。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | Name | string | Feature 名称 |
 | Base | string | 基准分支 |
 | MainProject | *ModuleStatus | 主项目状态（可选） |
-| Modules | []ModuleStatus | 各模块在该环境下的状态 |
+| Modules | []ModuleStatus | 各配置内模块在该环境下的状态 |
 
 ### ModuleStatus
 

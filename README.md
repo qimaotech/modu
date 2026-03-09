@@ -12,7 +12,10 @@
 | `info`   | 查看 feature 详情                |
 | `init`   | 初始化仓库（克隆所有配置的仓库） |
 | `status` | 显示所有模块的脏状态             |
+| `update` | 更新代码（fetch + rebase）       |
+| `config` | 配置管理（创建/扫描）           |
 | `tui`    | 启动交互式 TUI 界面              |
+| `version`| 显示版本信息                     |
 
 ## 安装
 
@@ -104,6 +107,19 @@ modu list -o json
 # 启动 TUI
 modu
 modu tui
+
+# 更新代码（主项目或 feature）
+modu update                    # 更新主项目（workspace + 所有模块）
+modu update my-feature         # 更新指定 feature 的 worktree
+
+# 配置管理
+modu config create                           # 交互式创建配置文件
+modu config create --module "frontend=..."   # 指定模块创建配置
+modu config scan                             # 扫描目录自动发现模块
+modu config scan --module "backend=..."       # 扫描并添加模块
+
+# 查看版本信息
+modu version
 
 ### TUI 快捷键
 

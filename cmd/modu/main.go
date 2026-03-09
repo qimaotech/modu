@@ -266,11 +266,15 @@ func runCreate(cmd *cobra.Command, args []string) {
 	featurePath := filepath.Join(eng.Config.WorktreeRoot, feature)
 	var existingModules []string
 	if _, err := os.Stat(featurePath); err == nil {
-		// feature 已存在，获取已有的模块
+		// feature 已存在，只把配置中的模块算作已有模块，避免把 .claude、openspec 等非模块目录纳入增删
+		configuredNames := make(map[string]bool)
+		for _, m := range eng.Config.Modules {
+			configuredNames[m.Name] = true
+		}
 		fmt.Printf("Feature %s 已存在，以下模块已创建:\n", feature)
 		entries, _ := os.ReadDir(featurePath)
 		for _, entry := range entries {
-			if entry.IsDir() && entry.Name() != ".git" {
+			if entry.IsDir() && entry.Name() != ".git" && configuredNames[entry.Name()] {
 				existingModules = append(existingModules, entry.Name())
 				fmt.Printf("  - %s\n", entry.Name())
 			}

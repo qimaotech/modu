@@ -13,9 +13,10 @@ tasks:
 
   # ========== 开发工具 ==========
   test:
-    desc: 运行单元测试
+    desc: 运行单元测试并输出覆盖率
     cmds:
-      - go test -v ./...
+      - go test ./... -coverprofile=coverage.out -covermode=atomic
+      - go tool cover -func=coverage.out
 
   e2e:
     desc: 运行端到端测试
