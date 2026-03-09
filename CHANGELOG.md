@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.0.4](https://codeup.aliyun.com/qimao/public/devops/modu/compare/v0.0.3...v0.0.4) (2026-03-09)
+
+
+### Features
+
+* 仅将配置内模块视为模块并中文化删除提示与测试覆盖 ([66f7eef](https://codeup.aliyun.com/qimao/public/devops/modu/commit/66f7eef6a6a4a270ca1196ae6f50229da54556db))
+
 ### [0.0.3](https://codeup.aliyun.com/qimao/public/devops/modu/compare/v0.0.2...v0.0.3) (2026-03-09)
 
 
