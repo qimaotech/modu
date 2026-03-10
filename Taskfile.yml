@@ -123,4 +123,5 @@ tasks:
     desc: 清理构建产物
     cmds:
       - rm -rf bin/
+      - rm -rf dist/
       - rm -f coverage.out coverage.html

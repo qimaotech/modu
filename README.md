@@ -19,26 +19,10 @@
 
 ## 安装
 
-### 安装脚本（推荐，可指定版本）
-
 ```bash
-# 安装指定版本（推荐，便于复现与确认）
-curl -sSfL https://github.com/qimaotech/modu/-/raw/main/install.sh | sh -s v1.0.0
-
-# 安装最新
-curl -sSfL https://github.com/qimaotech/modu/-/raw/main/install.sh | sh -s
+brew tap qimaotech/modu
+brew install modu
 ```
-
-### go install
-
-```bash
-# 指定版本
-go install github.com/qimaotech/modu/cmd/modu@v1.0.0
-# 或最新
-go install github.com/qimaotech/modu/cmd/modu@latest
-```
-
-> 注意：确保 `$(go env GOPATH)/bin` 或 `$(go env GOBIN)` 在你的 PATH 中。
 
 ## 使用方法
 
@@ -193,3 +177,7 @@ task build
 - Go 1.25+
 - [Cobra](https://github.com/spf13/cobra) - CLI 框架
 - [Bubble Tea](https://github.com/charmbracelet/bubbletea) - TUI 框架
+
+## 开源协议
+
+[MIT License](LICENSE)
