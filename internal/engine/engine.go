@@ -9,11 +9,11 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/config"
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/core"
-	errs "codeup.aliyun.com/qimao/public/devops/modu/internal/errors"
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/gitproxy"
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/logger"
+	"github.com/qimaotech/modu/internal/config"
+	"github.com/qimaotech/modu/internal/core"
+	errs "github.com/qimaotech/modu/internal/errors"
+	"github.com/qimaotech/modu/internal/gitproxy"
+	"github.com/qimaotech/modu/internal/logger"
 )
 
 // Engine 核心业务引擎

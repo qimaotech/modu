@@ -9,9 +9,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/config"
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/core"
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/engine"
+	"github.com/qimaotech/modu/internal/config"
+	"github.com/qimaotech/modu/internal/core"
+	"github.com/qimaotech/modu/internal/engine"
 )
 
 // 全局样式

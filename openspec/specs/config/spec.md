@@ -44,8 +44,8 @@
 
 ```yaml
 version: "2.4"
-workspace: /opt/case/commerce/workspace
-worktree-root: /opt/case/commerce/worktrees
+workspace: ./workspace
+worktree-root: ./worktrees
 default-base: develop
 concurrency: 8
 auto-fetch: true
@@ -53,7 +53,7 @@ strict-dirty-check: true
 
 modules:
   - name: pixiu-ad-server
-    url: git@codeup.aliyun.com:qimao/commerce/pixiu-ad-server.git
+    url: git@github.com:commerce/server.git
 ```
 
 ## 与代码的对应

@@ -1,0 +1,43 @@
+# GoReleaser: 多平台构建、GitHub Release、Homebrew Formula
+# 版本信息通过 ldflags 注入 main.version/main.commit/main.date（默认已支持）
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: modu
+    main: ./cmd/modu
+    binary: modu
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    env:
+      - CGO_ENABLED=0
+    # 使用默认 ldflags：-X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+archives:
+  - format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+
+# release 使用 git remote 推断 GitHub/GitLab 仓库；需设置 GITHUB_TOKEN 等
+release:
+  draft: false
+
+# Homebrew Formula：需先创建 tap 仓库（如 owner/homebrew-modu），并配置写权限
+brews:
+  - name: modu
+    homepage: "https://github.com/{{ envOrDefault \"HOMEBREW_TAP_OWNER\" \"qimao\" }}/modu"
+    description: "多模块 Git Worktree 管理工具"
+    repository:
+      owner: "{{ envOrDefault \"HOMEBREW_TAP_OWNER\" \"qimaotech\" }}"
+      name: "{{ envOrDefault \"HOMEBREW_TAP_NAME\" \"homebrew-modu\" }}"
+    commit_author:
+      name: "{{ envOrDefault \"GIT_AUTHOR_NAME\" \"modu-bot\" }}"
+      email: "{{ envOrDefault \"GIT_AUTHOR_EMAIL\" \"modu@localhost\" }}"

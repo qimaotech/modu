@@ -1,25 +1,8 @@
-# modu 分发与升级规范
+# modu 分发与升级规范（delta）
 
-**版本**: 2.5 | **来源**: openspec/changes/archive/2025-03-10-goreleaser-version-homebrew
+**变更**: goreleaser-version-homebrew | **基规范**: openspec/specs/release/spec.md
 
-## 目的
-
-定义构建、分发与升级方式。
-
-## 构建与分发
-
-- 使用 **GoReleaser** 打包。
-- 支持 **brew install** 接入。
-- 支持平台：Darwin / Linux，arm64 / amd64。
-- 一键安装脚本：`curl -sSL https://get.modu.sh | sh`（若提供）。
-
-## 版本与升级
-
-- 内置 **modu upgrade** 命令（可选）：通过 GitHub API 检查新版本并替换本地二进制。
-
----
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: 版本信息由构建时注入并展示
 
@@ -56,7 +39,3 @@
 #### Scenario: 在错误分支执行 release task
 - **WHEN** 当前分支非 main 且非 master 时执行 release task
 - **THEN** task 报错并退出，不执行 goreleaser
-
-## 与代码的对应
-
-- 版本：`cmd/modu/main.go` 中 version/commit/date 变量及 `version` 子命令；GoReleaser 配置在项目根目录 `.goreleaser.yml`；发布流程见 Taskfile 的 `release` 等 task。

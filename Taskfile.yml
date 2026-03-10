@@ -41,21 +41,12 @@ tasks:
       - GOOS=darwin GOARCH=arm64 go build -o bin/modu-darwin-arm64 ./cmd/...
       - GOOS=linux GOARCH=amd64 go build -o bin/modu-linux-amd64 ./cmd/...
 
-  # ========== standard-version ==========
-
-  # 安装依赖（全局安装）
-  install-deps:
-    desc: 全局安装 standard-version
-    cmds:
-      - npm install -g standard-version
-
-  # 发布新版本（自动根据 commit message 判断版本类型）
-  # 仅限 master/main 分支执行
-  # feat: → minor | fix: → patch | BREAKING CHANGE: → major
-  # 程序启动时自动从 git tag 读取版本
+  # ========== 发布（GoReleaser） ==========
+  # 详见 docs/RELEASE.md；发布前需先打 tag，例如: git tag v1.0.0 && task release
+  # 安装 GoReleaser: go install github.com/goreleaser/goreleaser/v2@latest
   release:
     silent: true
-    desc: 自动根据 commit message 发布新版本（仅限 master/main）
+    desc: 在 main/master 分支执行 GoReleaser 发布（需已打 tag，设 GITHUB_TOKEN）
     cmds:
       - |
         BRANCH=$(git branch --show-current)
@@ -64,15 +55,59 @@ tasks:
           echo "Current branch: $BRANCH"
           exit 1
         fi
+        if ! command -v goreleaser >/dev/null 2>&1; then
+          echo "GoReleaser not found. Install: go install github.com/goreleaser/goreleaser/v2@latest"
+          exit 1
+        fi
+        goreleaser release
 
-        # 执行 standard-version 并创建 tag
-        standard-version
-
-  # 查看当前版本
-  version:dry-run:
-    desc: 查看当前版本
+  release:check:
+    desc: 检查发布前置条件（分支、tag、GoReleaser、GITHUB_TOKEN）
     cmds:
-      - standard-version --dry-run
+      - |
+        echo "=== Release 前置检查 ==="
+        BRANCH=$(git branch --show-current)
+        if [[ "$BRANCH" != "master" && "$BRANCH" != "main" ]]; then
+          echo "✗ 当前分支 $BRANCH，需在 main 或 master"
+        else
+          echo "✓ 分支: $BRANCH"
+        fi
+        TAG=$(git describe --tags --exact-match 2>/dev/null || true)
+        if [[ -z "$TAG" ]]; then
+          echo "✗ 当前 commit 无 tag，请先: git tag vX.Y.Z && git push origin vX.Y.Z"
+        else
+          echo "✓ Tag: $TAG"
+        fi
+        if command -v goreleaser >/dev/null 2>&1; then
+          echo "✓ GoReleaser: $(goreleaser --version 2>/dev/null || echo installed)"
+        else
+          echo "✗ 未安装 GoReleaser: go install github.com/goreleaser/goreleaser/v2@latest"
+        fi
+        if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+          echo "✓ GITHUB_TOKEN 已设置"
+        else
+          echo "✗ 未设置 GITHUB_TOKEN，发布前请: export GITHUB_TOKEN=ghp_xxx"
+        fi
+        echo ""
+        echo "完整步骤见: docs/RELEASE.md"
+
+  release:snapshot:
+    desc: 本地快照构建（不发布），产物在 dist/
+    cmds:
+      - |
+        if ! command -v goreleaser >/dev/null 2>&1; then
+          echo "GoReleaser not found. Install: go install github.com/goreleaser/goreleaser/v2@latest"
+          exit 1
+        fi
+        goreleaser build --snapshot --clean
+
+  version:next:
+    desc: 显示当前 tag 并提示打 tag 后执行 task release
+    cmds:
+      - |
+        TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+        echo "Current tag: $TAG"
+        echo "To release: git tag vX.Y.Z && git push origin vX.Y.Z && task release"
 
   # ========== Pre-commit ==========
   pre-commit:

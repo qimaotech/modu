@@ -132,7 +132,7 @@ modules:
   source: config
   repos:
     - name: pixiu-ad-server
-      url: git@codeup.aliyun.com:qimao/commerce/pixiu-ad-server.git
+      url: git@github.com:commerce/pixiu-ad-server.git
 ```
 
 ---

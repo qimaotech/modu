@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/config"
+	"github.com/qimaotech/modu/internal/config"
 )
 
 // 配置初始化向导样式

@@ -6,9 +6,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/config"
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/core"
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/engine"
+	"github.com/qimaotech/modu/internal/config"
+	"github.com/qimaotech/modu/internal/core"
+	"github.com/qimaotech/modu/internal/engine"
 )
 
 // TestMainProjectEntry_IsMainProject 主项目列表项返回 true

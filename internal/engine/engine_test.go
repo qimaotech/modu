@@ -8,24 +8,24 @@ import (
 	"strings"
 	"testing"
 
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/config"
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/core"
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/gitproxy"
+	"github.com/qimaotech/modu/internal/config"
+	"github.com/qimaotech/modu/internal/core"
+	"github.com/qimaotech/modu/internal/gitproxy"
 )
 
 // MockGitClient 用于测试的 Mock Git 客户端
 type MockGitClient struct {
-	CloneFunc                       func(ctx context.Context, url, path string) error
-	CreateWorktreeFunc              func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error
+	CloneFunc                            func(ctx context.Context, url, path string) error
+	CreateWorktreeFunc                   func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error
 	CreateWorktreeFromExistingBranchFunc func(ctx context.Context, repoPath, branch, worktreePath string) error
-	GetStatusFunc                   func(ctx context.Context, path string) (gitproxy.Status, error)
-	RemoveWorktreeFunc              func(ctx context.Context, path string) error
-	RemoveWorktreeAndBranchFunc     func(ctx context.Context, repoPath, branch, worktreePath string) error
-	ListWorktreesFunc               func(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error)
-	FetchFunc                       func(ctx context.Context, repoPath string) error
-	RebaseFunc                      func(ctx context.Context, path string) error
-	BranchExistsFunc                func(ctx context.Context, repoPath, branch string) bool
-	CheckBranchWorktreeStatusFunc   func(ctx context.Context, repoPath, branch string) (bool, error)
+	GetStatusFunc                        func(ctx context.Context, path string) (gitproxy.Status, error)
+	RemoveWorktreeFunc                   func(ctx context.Context, path string) error
+	RemoveWorktreeAndBranchFunc          func(ctx context.Context, repoPath, branch, worktreePath string) error
+	ListWorktreesFunc                    func(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error)
+	FetchFunc                            func(ctx context.Context, repoPath string) error
+	RebaseFunc                           func(ctx context.Context, path string) error
+	BranchExistsFunc                     func(ctx context.Context, repoPath, branch string) bool
+	CheckBranchWorktreeStatusFunc        func(ctx context.Context, repoPath, branch string) (bool, error)
 }
 
 var _ gitproxy.GitClient = (*MockGitClient)(nil)

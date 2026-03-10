@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/core"
+	"github.com/qimaotech/modu/internal/core"
 )
 
 // TestNew_DefaultFormat 测试默认格式

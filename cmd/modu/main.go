@@ -1,61 +1,27 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/config"
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/engine"
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/errors"
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/output"
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/ui"
+	"github.com/qimaotech/modu/internal/config"
+	"github.com/qimaotech/modu/internal/engine"
+	"github.com/qimaotech/modu/internal/errors"
+	"github.com/qimaotech/modu/internal/output"
+	"github.com/qimaotech/modu/internal/ui"
 
 	"github.com/spf13/cobra"
 )
 
-// 版本信息，运行时从 git 自动获取
+// 版本信息，构建时通过 ldflags 注入（GoReleaser）；未注入时为默认值
 var (
 	version = "dev"
 	commit  = "unknown"
 	date    = "unknown"
 )
-
-func init() {
-	ctx := context.Background()
-	// 启动时自动从 git 获取版本信息
-	if v, err := gitDescribe(ctx); err == nil {
-		version = v
-	}
-	if c, err := gitCommit(ctx); err == nil {
-		commit = c
-	}
-	if d, err := gitDate(ctx); err == nil {
-		date = d
-	}
-}
-
-func gitDescribe(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, "git", "describe", "--tags", "--abbrev=0").Output()
-	if err != nil {
-		return "dev", fmt.Errorf("git describe: %w", err)
-	}
-	return strings.TrimPrefix(strings.TrimSpace(string(out)), "v"), nil
-}
-
-func gitCommit(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--short", "HEAD").Output()
-	return strings.TrimSpace(string(out)), err
-}
-
-func gitDate(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, "git", "log", "-1", "--format=%ci").Output()
-	return strings.TrimSpace(string(out)), err
-}
 
 // isInteractiveTerminal 检查是否是交互式终端
 func isInteractiveTerminal() bool {

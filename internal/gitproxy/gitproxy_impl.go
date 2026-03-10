@@ -8,8 +8,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/errors"
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/logger"
+	"github.com/qimaotech/modu/internal/errors"
+	"github.com/qimaotech/modu/internal/logger"
 )
 
 // GitProxy Git 操作真实实现

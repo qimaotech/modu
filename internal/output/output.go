@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"codeup.aliyun.com/qimao/public/devops/modu/internal/core"
+	"github.com/qimaotech/modu/internal/core"
 )
 
 // Result 单个模块的操作结果

@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	errs "codeup.aliyun.com/qimao/public/devops/modu/internal/errors"
+	errs "github.com/qimaotech/modu/internal/errors"
 	"gopkg.in/yaml.v3"
 )
 

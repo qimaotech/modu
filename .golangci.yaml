@@ -59,7 +59,7 @@ linters:
             - modu
             - gopkg.in
             - golang.org/x
-            - codeup.aliyun.com/qimao/public/devops/modu
+            - github.com/qimaotech/modu
     dogsled:
       max-blank-identifiers: 2
     dupl:

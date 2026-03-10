@@ -19,10 +19,23 @@
 
 ## 安装
 
+### 安装脚本（推荐，可指定版本）
+
+```bash
+# 安装指定版本（推荐，便于复现与确认）
+curl -sSfL https://github.com/qimaotech/modu/-/raw/main/install.sh | sh -s v1.0.0
+
+# 安装最新
+curl -sSfL https://github.com/qimaotech/modu/-/raw/main/install.sh | sh -s
+```
+
 ### go install
 
 ```bash
-go install codeup.aliyun.com/qimao/public/devops/modu/cmd/modu@latest
+# 指定版本
+go install github.com/qimaotech/modu/cmd/modu@v1.0.0
+# 或最新
+go install github.com/qimaotech/modu/cmd/modu@latest
 ```
 
 > 注意：确保 `$(go env GOPATH)/bin` 或 `$(go env GOBIN)` 在你的 PATH 中。
@@ -43,9 +56,9 @@ strict-dirty-check: true
 
 modules:
   - name: frontend
-    url: https://codeup.aliyun.com/example/frontend.git
+    url: https://github.com/example/frontend.git
   - name: backend
-    url: https://codeup.aliyun.com/example/backend.git
+    url: https://github.com/example/backend.git
 ```
 
 **配置项说明：**
@@ -132,8 +145,8 @@ modu version
 
 # 创建配置文件
 modu config create
-modu config create --module "frontend=https://codeup.aliyun.com/example/frontend.git"
-modu config create --scan  # 自动扫描并添加模块
+modu config create --module "frontend=git@github.com:example/frontend.git"
+modu config create --scan  # 自动扫描并添加模
 
 # 扫描目录添加模块
 modu config scan
@@ -157,12 +170,23 @@ go test -v -tags=e2e -run TestE2E .
 # 代码检查
 golangci-lint run
 
-# 构建
+# 本地构建（版本显示为 dev/unknown，仅开发用）
 go build -o modu ./cmd/modu
-
-# 发布构建
-goreleaser build --clean
+# 或
+task build
 ```
+
+### 构建与发布
+
+- **版本来源**：正式发布的二进制版本号由 [GoReleaser](https://goreleaser.com/) 在构建时通过 ldflags 注入；本地 `go build` 未注入，`modu version` 会显示 `dev` / `unknown`。
+- **安装 GoReleaser**：`go install github.com/goreleaser/goreleaser/v2@latest`（或参见 [官方安装说明](https://goreleaser.com/install)）。
+- **本地多平台构建（不发布）**：`goreleaser build --snapshot --clean`，产物在 `dist/`。
+- **发布新版本**（需在 main/master 分支）：
+  1. 打 tag：`git tag v1.2.3`
+  2. 执行：`task release`（内部会调用 `goreleaser release`）
+  3. 需配置 `GITHUB_TOKEN`（或所用 SCM 的 token）；若使用 Homebrew tap，需创建 tap 仓库并配置写权限，见 `.goreleaser.yml` 中 `brews` 及环境变量说明。
+- 查看当前 tag 与发布提示：`task version:next`。
+- **详细步骤**（GitHub Release + Homebrew tap）：见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ## 技术栈
 
