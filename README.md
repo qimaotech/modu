@@ -69,6 +69,20 @@ modules:
 
 执行 `modu init` 或 `modu config scan` 时会自动更新主仓库的 `.gitignore` 文件，添加所有模块目录，避免模块代码被意外提交到主仓库。
 
+### 自动 VSCode Workspace 创建
+
+执行 `modu create`、`modu add-module`、`modu remove-module` 命令时会自动在 feature 目录下生成 `{feature}.code-workspace` 文件，包含：
+
+- **文件夹**：自动扫描并添加配置中实际存在的模块
+- **Go 开发配置**：
+  - 启用 Go 语言服务器
+  - 配置 golangci-lint 作为 linter
+  - 使用 gofmt 格式化
+  - 指定 Go 二进制路径
+- **推荐插件**：golang.go、vue.volar、vscode-typescript-next
+
+打开 workspace 文件即可获得统一的开发环境配置。
+
 ### 命令示例
 
 ```bash

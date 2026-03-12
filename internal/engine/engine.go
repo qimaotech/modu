@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -230,6 +231,99 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 	}
 
 	logger.Info("成功创建 feature: %s", feature)
+
+	// 创建 VSCode workspace 文件
+	if err := e.createVSCodeWorkspace(feature, featurePath); err != nil {
+		logger.Warn("创建 VSCode workspace 文件失败: %v", err)
+	}
+
+	return nil
+}
+
+// vscodeWorkspace VSCode workspace 配置结构
+type vscodeWorkspace struct {
+	Folder    []folder    `json:"folders"`
+	Settings  settings    `json:"settings"`
+	Extensions extensions `json:"extensions"`
+}
+
+type folder struct {
+	Path string `json:"path"`
+}
+
+type settings struct {
+	GoToolsManagementAutoUpdate bool            `json:"go.toolsManagement.autoUpdate"`
+	GoLintTool                 string           `json:"go.lintTool"`
+	GoLintOnSave               string           `json:"go.lintOnSave"`
+	GoFormatTool               string           `json:"go.formatTool"`
+	GoUseLanguageServer        bool             `json:"go.useLanguageServer"`
+	GoAlternateTools           map[string]any  `json:"go.alternateTools"`
+}
+
+type extensions struct {
+	Recommendations []string `json:"recommendations"`
+}
+
+// createVSCodeWorkspace 创建 VSCode workspace 文件
+func (e *Engine) createVSCodeWorkspace(feature, featurePath string) error {
+	workspaceFile := filepath.Join(featurePath, feature+".code-workspace")
+
+	// 构建 folders 数组：只包含 feature 中实际存在的模块
+	folders := make([]folder, 0, 8)
+
+	// 获取配置的模块名称集合
+	configuredModules := make(map[string]bool)
+	for _, m := range e.Config.Modules {
+		configuredModules[m.Name] = true
+	}
+
+	// 扫描 feature 目录，只添加实际存在的模块
+	entries, err := os.ReadDir(featurePath)
+	if err != nil {
+		return fmt.Errorf("failed to read feature directory: %w", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		// 跳过非模块目录（如 .git, .claude 等）
+		if !configuredModules[entry.Name()] {
+			continue
+		}
+		folders = append(folders, folder{Path: entry.Name()})
+	}
+
+	workspace := vscodeWorkspace{
+		Folder: folders,
+		Settings: settings{
+			GoToolsManagementAutoUpdate: true,
+			GoLintTool:                 "golangci-lint",
+			GoLintOnSave:               "package",
+			GoFormatTool:               "gofmt",
+			GoUseLanguageServer:        true,
+			GoAlternateTools: map[string]any{
+				"go": "/usr/local/go/bin/go",
+			},
+		},
+		Extensions: extensions{
+			Recommendations: []string{
+				"golang.go",
+				"vue.volar",
+				"ms-vscode.vscode-typescript-next",
+			},
+		},
+	}
+
+	data, err := json.MarshalIndent(workspace, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal workspace: %w", err)
+	}
+
+	if err := os.WriteFile(workspaceFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write workspace file: %w", err)
+	}
+
+	logger.Info("创建 VSCode workspace 文件: %s", workspaceFile)
 	return nil
 }
 
@@ -733,6 +827,11 @@ func (e *Engine) AddModule(ctx context.Context, feature, moduleName string) erro
 			return fmt.Errorf("failed to create worktree for %s: %w", moduleName, err)
 		}
 		logger.Info("成功为 feature %s 添加模块: %s", feature, moduleName)
+
+		// 更新 VSCode workspace 文件
+		if err := e.createVSCodeWorkspace(feature, featurePath); err != nil {
+			logger.Warn("更新 VSCode workspace 文件失败: %v", err)
+		}
 		return nil
 	}
 
@@ -742,6 +841,11 @@ func (e *Engine) AddModule(ctx context.Context, feature, moduleName string) erro
 	}
 
 	logger.Info("成功为 feature %s 添加模块: %s", feature, moduleName)
+
+	// 更新 VSCode workspace 文件
+	if err := e.createVSCodeWorkspace(feature, featurePath); err != nil {
+		logger.Warn("更新 VSCode workspace 文件失败: %v", err)
+	}
 	return nil
 }
 
@@ -794,5 +898,10 @@ func (e *Engine) RemoveModule(ctx context.Context, feature, moduleName string) e
 	}
 
 	logger.Info("成功为 feature %s 删除模块: %s", feature, moduleName)
+
+	// 更新 VSCode workspace 文件
+	if err := e.createVSCodeWorkspace(feature, featurePath); err != nil {
+		logger.Warn("更新 VSCode workspace 文件失败: %v", err)
+	}
 	return nil
 }

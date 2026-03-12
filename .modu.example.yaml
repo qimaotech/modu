@@ -1,0 +1,12 @@
+workspace: ~/workspace/main
+worktree-root: ~/workspace
+default-base: develop
+concurrency: 5
+auto-fetch: true
+strict-dirty-check: true
+
+modules:
+  - name: frontend
+    url: git@github.com:example/frontend.git
+  - name: backend
+    url: git@github.com:example/backend.git

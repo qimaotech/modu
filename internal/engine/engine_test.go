@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -462,5 +463,279 @@ func TestUpdateWorktree_PartialFailure(t *testing.T) {
 	}
 	if len(failed) != 1 || failed["m1"] != rebaseErr {
 		t.Errorf("expected failed[m1]=rebaseErr, got failed=%v", failed)
+	}
+}
+
+func TestCreateVSCodeWorkspace(t *testing.T) {
+	// 创建临时目录
+	tmpDir, err := os.MkdirTemp("", "modu-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// 创建配置
+	cfg := &config.Config{
+		Workspace:     filepath.Join(tmpDir, "workspace"),
+		WorktreeRoot: filepath.Join(tmpDir, "worktrees"),
+		Modules: []config.Module{
+			{Name: "module1"},
+			{Name: "module2"},
+		},
+	}
+
+	// 创建 workspace 和 feature 目录
+	if err := os.MkdirAll(cfg.Workspace, 0755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+
+	engine := New(cfg)
+	featurePath := filepath.Join(cfg.WorktreeRoot, "test-feature")
+
+	// 创建 feature 目录
+	if err := os.MkdirAll(featurePath, 0755); err != nil {
+		t.Fatalf("failed to create feature path: %v", err)
+	}
+
+	// 创建实际的模块目录（模拟已添加的模块）
+	if err := os.MkdirAll(filepath.Join(featurePath, "module1"), 0755); err != nil {
+		t.Fatalf("failed to create module1: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(featurePath, "module2"), 0755); err != nil {
+		t.Fatalf("failed to create module2: %v", err)
+	}
+
+	// 调用 createVSCodeWorkspace
+	err = engine.createVSCodeWorkspace("test-feature", featurePath)
+	if err != nil {
+		t.Fatalf("createVSCodeWorkspace failed: %v", err)
+	}
+
+	// 验证文件生成
+	workspaceFile := filepath.Join(featurePath, "test-feature.code-workspace")
+	if _, err := os.Stat(workspaceFile); os.IsNotExist(err) {
+		t.Fatalf("workspace file not created: %s", workspaceFile)
+	}
+
+	// 验证文件内容
+	data, err := os.ReadFile(workspaceFile)
+	if err != nil {
+		t.Fatalf("failed to read workspace file: %v", err)
+	}
+
+	// 验证 JSON 结构
+	var ws vscodeWorkspace
+	if err := json.Unmarshal(data, &ws); err != nil {
+		t.Fatalf("failed to parse workspace JSON: %v", err)
+	}
+
+	// 验证 folders 只包含模块
+	if len(ws.Folder) != 2 {
+		t.Errorf("expected 2 folders (modules only), got %d", len(ws.Folder))
+	}
+
+	// 验证模块
+	if ws.Folder[0].Path != "module1" {
+		t.Errorf("expected folder[0] to be 'module1', got %s", ws.Folder[0].Path)
+	}
+	if ws.Folder[1].Path != "module2" {
+		t.Errorf("expected folder[1] to be 'module2', got %s", ws.Folder[1].Path)
+	}
+
+	// 验证 settings
+	if !ws.Settings.GoToolsManagementAutoUpdate {
+		t.Error("expected GoToolsManagementAutoUpdate to be true")
+	}
+	if ws.Settings.GoLintTool != "golangci-lint" {
+		t.Errorf("expected GoLintTool to be 'golangci-lint', got %s", ws.Settings.GoLintTool)
+	}
+
+	// 验证 extensions
+	if len(ws.Extensions.Recommendations) != 3 {
+		t.Errorf("expected 3 recommendations, got %d", len(ws.Extensions.Recommendations))
+	}
+}
+
+func TestCreateVSCodeWorkspace_EmptyFeature(t *testing.T) {
+	// 测试空 feature 目录（无模块）
+	tmpDir, err := os.MkdirTemp("", "modu-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Workspace:     filepath.Join(tmpDir, "workspace"),
+		WorktreeRoot: filepath.Join(tmpDir, "worktrees"),
+		Modules: []config.Module{
+			{Name: "module1"},
+			{Name: "module2"},
+		},
+	}
+
+	if err := os.MkdirAll(cfg.Workspace, 0755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+
+	engine := New(cfg)
+	featurePath := filepath.Join(cfg.WorktreeRoot, "empty-feature")
+
+	// 创建空的 feature 目录（无模块）
+	if err := os.MkdirAll(featurePath, 0755); err != nil {
+		t.Fatalf("failed to create feature path: %v", err)
+	}
+
+	err = engine.createVSCodeWorkspace("empty-feature", featurePath)
+	if err != nil {
+		t.Fatalf("createVSCodeWorkspace failed: %v", err)
+	}
+
+	// 验证文件生成
+	workspaceFile := filepath.Join(featurePath, "empty-feature.code-workspace")
+	data, err := os.ReadFile(workspaceFile)
+	if err != nil {
+		t.Fatalf("failed to read workspace file: %v", err)
+	}
+
+	var ws vscodeWorkspace
+	if err := json.Unmarshal(data, &ws); err != nil {
+		t.Fatalf("failed to parse workspace JSON: %v", err)
+	}
+
+	// 验证 folders 为空数组
+	if len(ws.Folder) != 0 {
+		t.Errorf("expected 0 folders for empty feature, got %d", len(ws.Folder))
+	}
+}
+
+func TestCreateVSCodeWorkspace_Overwrite(t *testing.T) {
+	// 测试 workspace 文件覆盖更新
+	tmpDir, err := os.MkdirTemp("", "modu-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Workspace:     filepath.Join(tmpDir, "workspace"),
+		WorktreeRoot: filepath.Join(tmpDir, "worktrees"),
+		Modules: []config.Module{
+			{Name: "module1"},
+		},
+	}
+
+	if err := os.MkdirAll(cfg.Workspace, 0755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+
+	engine := New(cfg)
+	featurePath := filepath.Join(cfg.WorktreeRoot, "test-feature")
+
+	if err := os.MkdirAll(featurePath, 0755); err != nil {
+		t.Fatalf("failed to create feature path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(featurePath, "module1"), 0755); err != nil {
+		t.Fatalf("failed to create module1: %v", err)
+	}
+
+	// 第一次创建
+	err = engine.createVSCodeWorkspace("test-feature", featurePath)
+	if err != nil {
+		t.Fatalf("first createVSCodeWorkspace failed: %v", err)
+	}
+
+	// 读取原始文件内容
+	workspaceFile := filepath.Join(featurePath, "test-feature.code-workspace")
+	originalContent, err := os.ReadFile(workspaceFile)
+	if err != nil {
+		t.Fatalf("failed to read original workspace file: %v", err)
+	}
+
+	// 第二次创建（覆盖）
+	err = engine.createVSCodeWorkspace("test-feature", featurePath)
+	if err != nil {
+		t.Fatalf("second createVSCodeWorkspace failed: %v", err)
+	}
+
+	// 验证文件被覆盖
+	newContent, err := os.ReadFile(workspaceFile)
+	if err != nil {
+		t.Fatalf("failed to read new workspace file: %v", err)
+	}
+
+	if string(originalContent) != string(newContent) {
+		t.Error("workspace file should be overwritten with same content")
+	}
+
+	// 验证仍然是有效的 JSON
+	var ws vscodeWorkspace
+	if err := json.Unmarshal(newContent, &ws); err != nil {
+		t.Fatalf("failed to parse overwritten workspace JSON: %v", err)
+	}
+}
+
+func TestCreateVSCodeWorkspace_SkipNonModuleDirs(t *testing.T) {
+	// 测试跳过非模块目录
+	tmpDir, err := os.MkdirTemp("", "modu-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Workspace:     filepath.Join(tmpDir, "workspace"),
+		WorktreeRoot: filepath.Join(tmpDir, "worktrees"),
+		Modules: []config.Module{
+			{Name: "module1"},
+		},
+	}
+
+	if err := os.MkdirAll(cfg.Workspace, 0755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+
+	engine := New(cfg)
+	featurePath := filepath.Join(cfg.WorktreeRoot, "test-feature")
+
+	if err := os.MkdirAll(featurePath, 0755); err != nil {
+		t.Fatalf("failed to create feature path: %v", err)
+	}
+	// 创建模块目录
+	if err := os.MkdirAll(filepath.Join(featurePath, "module1"), 0755); err != nil {
+		t.Fatalf("failed to create module1: %v", err)
+	}
+	// 创建非模块目录（应该被跳过）
+	if err := os.MkdirAll(filepath.Join(featurePath, ".git"), 0755); err != nil {
+		t.Fatalf("failed to create .git: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(featurePath, ".claude"), 0755); err != nil {
+		t.Fatalf("failed to create .claude: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(featurePath, "some-random-dir"), 0755); err != nil {
+		t.Fatalf("failed to create random dir: %v", err)
+	}
+
+	err = engine.createVSCodeWorkspace("test-feature", featurePath)
+	if err != nil {
+		t.Fatalf("createVSCodeWorkspace failed: %v", err)
+	}
+
+	workspaceFile := filepath.Join(featurePath, "test-feature.code-workspace")
+	data, err := os.ReadFile(workspaceFile)
+	if err != nil {
+		t.Fatalf("failed to read workspace file: %v", err)
+	}
+
+	var ws vscodeWorkspace
+	if err := json.Unmarshal(data, &ws); err != nil {
+		t.Fatalf("failed to parse workspace JSON: %v", err)
+	}
+
+	// 只应该包含 module1
+	if len(ws.Folder) != 1 {
+		t.Errorf("expected 1 folder, got %d", len(ws.Folder))
+	}
+	if ws.Folder[0].Path != "module1" {
+		t.Errorf("expected folder[0] to be 'module1', got %s", ws.Folder[0].Path)
 	}
 }
