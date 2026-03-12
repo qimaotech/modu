@@ -33,6 +33,7 @@
 - 支持通过 `-c`/`--config` 指定配置文件路径，默认 `.modu.yaml`。
 - **必填校验**：缺失 `workspace`、`worktree-root`、`default-base` 或 `modules` 为空时，返回 `ERR_CONFIG_INVALID`。
 - **路径**：`workspace`、`worktree-root` 若为相对路径，则相对于配置文件所在目录解析为绝对路径。
+- **环境变量**：`workspace`、`worktree-root` 支持 `$VAR` 和 `${VAR}` 语法，环境变量必须已定义，否则加载失败并报错。详见 [config-env-var](../config-env-var/spec.md)。
 - **LoadConfigForScan**：scan 场景可仅校验基础字段，不强制校验 modules（用于先扫后写配置）。
 
 ## 配置命令

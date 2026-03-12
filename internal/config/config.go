@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	errs "github.com/qimaotech/modu/internal/errors"
@@ -76,6 +77,38 @@ func LoadConfigForScan(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// resolveEnvVars 解析并验证环境变量
+// 如果值包含 $VAR 或 ${VAR}，则验证该环境变量是否存在
+func resolveEnvVars(value *string, fieldName string) error {
+	// 先检查原始值是否包含环境变量语法
+	undefinedVars := extractUndefinedVars(*value)
+	if len(undefinedVars) > 0 {
+		return fmt.Errorf("%w: field '%s' contains undefined environment variable(s): %s",
+			errs.ErrConfigInvalid, fieldName, strings.Join(undefinedVars, ", "))
+	}
+
+	// 所有环境变量都已定义，展开它们
+	*value = os.ExpandEnv(*value)
+	return nil
+}
+
+// extractUndefinedVars 从值中提取未定义的环境变量名
+func extractUndefinedVars(value string) []string {
+	re := regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?`)
+	matches := re.FindAllStringSubmatch(value, -1)
+
+	var undefined []string
+	seen := make(map[string]bool)
+	for _, m := range matches {
+		varName := m[1]
+		if _, ok := os.LookupEnv(varName); !ok && !seen[varName] {
+			undefined = append(undefined, m[0])
+			seen[varName] = true
+		}
+	}
+	return undefined
+}
+
 // loadConfigImpl 加载配置文件的内部实现
 func loadConfigImpl(path string) (*Config, error) {
 	absPath, err := filepath.Abs(path)
@@ -94,6 +127,18 @@ func loadConfigImpl(path string) (*Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse yaml: %w", err)
+	}
+
+	// 解析环境变量（只检查已配置的字段）
+	if cfg.Workspace != "" {
+		if err := resolveEnvVars(&cfg.Workspace, "workspace"); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.WorktreeRoot != "" {
+		if err := resolveEnvVars(&cfg.WorktreeRoot, "worktree-root"); err != nil {
+			return nil, err
+		}
 	}
 
 	// 将 workspace 和 worktree-root 转换为绝对路径（相对于配置文件所在目录）

@@ -413,3 +413,160 @@ func TestScanWorkspace_NotExist(t *testing.T) {
 		t.Error("expected error for non-existent workspace")
 	}
 }
+
+// TestLoadConfig_EnvVarDollarFormat 测试 $VAR 格式环境变量
+func TestLoadConfig_EnvVarDollarFormat(t *testing.T) {
+	// 设置环境变量
+	t.Setenv("MY_WORKSPACE", "/test/workspace")
+	t.Setenv("MY_WORKTREE_ROOT", "/test/worktrees")
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, ".modu.yaml")
+	content := `workspace: $MY_WORKSPACE
+worktree-root: $MY_WORKTREE_ROOT
+default-base: develop
+modules:
+  - name: test
+    url: git@example.com:test.git
+`
+
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Workspace != "/test/workspace" {
+		t.Errorf("expected workspace /test/workspace, got %s", cfg.Workspace)
+	}
+	if cfg.WorktreeRoot != "/test/worktrees" {
+		t.Errorf("expected worktree-root /test/worktrees, got %s", cfg.WorktreeRoot)
+	}
+}
+
+// TestLoadConfig_EnvVarBraceFormat 测试 ${VAR} 格式环境变量
+func TestLoadConfig_EnvVarBraceFormat(t *testing.T) {
+	t.Setenv("MY_WORKSPACE", "/test/workspace")
+	t.Setenv("MY_WORKTREE_ROOT", "/test/worktrees")
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, ".modu.yaml")
+	content := `workspace: ${MY_WORKSPACE}
+worktree-root: ${MY_WORKTREE_ROOT}
+default-base: develop
+modules:
+  - name: test
+    url: git@example.com:test.git
+`
+
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Workspace != "/test/workspace" {
+		t.Errorf("expected workspace /test/workspace, got %s", cfg.Workspace)
+	}
+	if cfg.WorktreeRoot != "/test/worktrees" {
+		t.Errorf("expected worktree-root /test/worktrees, got %s", cfg.WorktreeRoot)
+	}
+}
+
+// TestLoadConfig_EnvVarUndefined 测试环境变量未定义时报错
+func TestLoadConfig_EnvVarUndefined(t *testing.T) {
+	// 确保环境变量不存在
+	os.Unsetenv("UNDEFINED_WORKSPACE_VAR")
+	os.Unsetenv("UNDEFINED_WORKTREE_VAR")
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, ".modu.yaml")
+	content := `workspace: $UNDEFINED_WORKSPACE_VAR
+worktree-root: /opt/worktrees
+default-base: develop
+modules:
+  - name: test
+    url: git@example.com:test.git
+`
+
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	_, err := LoadConfig(configPath)
+	if err == nil {
+		t.Error("expected error for undefined environment variable")
+	}
+	if !contains(err.Error(), "undefined environment variable") {
+		t.Errorf("expected error about undefined environment variable, got: %v", err)
+	}
+	if !contains(err.Error(), "workspace") {
+		t.Errorf("expected error to mention 'workspace' field, got: %v", err)
+	}
+}
+
+// TestLoadConfig_EnvVarMixed 测试路径包含环境变量
+func TestLoadConfig_EnvVarMixed(t *testing.T) {
+	t.Setenv("USER", "testuser")
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, ".modu.yaml")
+	content := `workspace: /home/$USER/workspace
+worktree-root: /home/$USER/worktrees
+default-base: develop
+modules:
+  - name: test
+    url: git@example.com:test.git
+`
+
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Workspace != "/home/testuser/workspace" {
+		t.Errorf("expected workspace /home/testuser/workspace, got %s", cfg.Workspace)
+	}
+	if cfg.WorktreeRoot != "/home/testuser/worktrees" {
+		t.Errorf("expected worktree-root /home/testuser/worktrees, got %s", cfg.WorktreeRoot)
+	}
+}
+
+// TestLoadConfig_NoEnvVar 测试无环境变量的配置正常工作
+func TestLoadConfig_NoEnvVar(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, ".modu.yaml")
+	content := `workspace: /opt/workspace
+worktree-root: /opt/worktrees
+default-base: develop
+modules:
+  - name: test
+    url: git@example.com:test.git
+`
+
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Workspace != "/opt/workspace" {
+		t.Errorf("expected workspace /opt/workspace, got %s", cfg.Workspace)
+	}
+	if cfg.WorktreeRoot != "/opt/worktrees" {
+		t.Errorf("expected worktree-root /opt/worktrees, got %s", cfg.WorktreeRoot)
+	}
+}

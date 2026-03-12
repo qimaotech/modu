@@ -65,6 +65,18 @@ modules:
 | `url`         | 是   | Git 仓库地址     |
 | `base-branch` | 否   | 覆盖全局默认分支 |
 
+**环境变量：**
+
+`workspace` 和 `worktree-root` 字段支持使用环境变量（适用于团队成员目录不同的情况）：
+
+- 语法：`$VAR` 或 `${VAR}`
+- 示例：
+  ```yaml
+  workspace: ${MY_WORKSPACE}
+  worktree-root: $WORKTREE_ROOT
+  ```
+- 注意：未配置的字段不会检查环境变量；如果环境变量未定义，modu 会报错并提示
+
 ### 自动 .gitignore 更新
 
 执行 `modu init` 或 `modu config scan` 时会自动更新主仓库的 `.gitignore` 文件，添加所有模块目录，避免模块代码被意外提交到主仓库。
