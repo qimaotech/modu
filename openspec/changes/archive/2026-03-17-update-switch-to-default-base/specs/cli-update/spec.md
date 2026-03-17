@@ -14,11 +14,11 @@ CLI SHALL 提供子命令 `modu update`，用于对项目执行更新（fetch + 
 
 #### Scenario: 无参数更新主项目
 - **WHEN** 用户执行 `modu update`（无参数）
-- **THEN** 对主项目（workspace 根仓库）及配置中的各模块路径并发执行 fetch + rebase，行为与 TUI 主项目“更新代码”一致
+- **THEN** 对主项目（workspace 根仓库）及配置中的各模块路径并发执行 fetch + rebase，行为与 TUI 主项目"更新代码"一致
 
 #### Scenario: 无参数更新成功输出
 - **WHEN** `modu update` 执行且全部成功
-- **THEN** 输出成功摘要（如“更新成功: 主项目”或“更新成功: 主项目 + N 个模块”），退出码 0
+- **THEN** 输出成功摘要（如"更新成功: 主项目"或"更新成功: 主项目 + N 个模块"），退出码 0
 
 #### Scenario: 无参数更新部分失败输出
 - **WHEN** `modu update` 执行且部分仓库失败
@@ -38,7 +38,9 @@ CLI SHALL 支持 `modu update <feature>`，对指定 feature 的 worktree 执行
 
 #### Scenario: 指定 feature 更新成功输出
 - **WHEN** `modu update <feature>` 执行且全部成功
-- **THEN** 输出成功摘要（如”更新成功: feature <name>（主项目 + N 个模块）”），退出码 0
+- **THEN** 输出成功摘要（如"更新成功: feature <name>（主项目 + N 个模块）"），退出码 0
+
+## MODIFIED Requirements
 
 ### Requirement: 主项目更新时切换到 default-base 分支
 
@@ -52,7 +54,7 @@ CLI SHALL 支持 `modu update <feature>`，对指定 feature 的 worktree 执行
 2. 调用 GitProxy.FetchAndSwitchBranch(repoPath, branch) 切换到对应分支
 
 #### Scenario: 主项目更新切换到 default-base 分支
-- **WHEN** 用户执行 `modu update` 且配置文件存在 default-base 配置（如 “develop”）
+- **WHEN** 用户执行 `modu update` 且配置文件存在 default-base 配置（如 "develop"）
 - **THEN** 主项目执行 fetch + checkout 到 origin/develop + rebase 到 origin/develop
 
 #### Scenario: 主项目更新无 default-base 配置
