@@ -18,7 +18,7 @@
 | `modu` | - | 无子命令时进入 TUI |
 | `modu create` | `<feature> [--base <branch>] [--modules m1,m2]` | 并发创建基于基准分支的 worktree；可指定部分模块；feature 已存在时可继续添加模块 |
 | `modu delete` | `<feature> [-f\|--force]` | 删除 worktree；默认脏检查，`--force` 跳过 |
-| `modu list` | `[-v\|--verbose]` | 列出所有 worktree；verbose 显示模块、分支、状态 |
+| `modu list` | `[-v\|--verbose] [-a\|--all]` | 列出所有 worktree；verbose 显示模块、分支、状态；-a 显示主项目及模块分支 |
 | `modu info` | `<feature>` | 查看指定 feature 详情 |
 | `modu init` | `[--scan]` | 并发克隆配置中的仓库；`--scan` 可先扫描发现模块再初始化 |
 | `modu status` | - | 批量展示所有模块 Dirty 状态 |
