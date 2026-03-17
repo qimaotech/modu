@@ -25,6 +25,7 @@ type MockGitClient struct {
 	ListWorktreesFunc                    func(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error)
 	FetchFunc                            func(ctx context.Context, repoPath string) error
 	RebaseFunc                           func(ctx context.Context, path string) error
+	FetchAndSwitchBranchFunc             func(ctx context.Context, repoPath, branch string) error
 	BranchExistsFunc                     func(ctx context.Context, repoPath, branch string) bool
 	CheckBranchWorktreeStatusFunc        func(ctx context.Context, repoPath, branch string) (bool, error)
 }
@@ -83,6 +84,13 @@ func (m *MockGitClient) Fetch(ctx context.Context, repoPath string) error {
 func (m *MockGitClient) Rebase(ctx context.Context, path string) error {
 	if m.RebaseFunc != nil {
 		return m.RebaseFunc(ctx, path)
+	}
+	return nil
+}
+
+func (m *MockGitClient) FetchAndSwitchBranch(ctx context.Context, repoPath, branch string) error {
+	if m.FetchAndSwitchBranchFunc != nil {
+		return m.FetchAndSwitchBranchFunc(ctx, repoPath, branch)
 	}
 	return nil
 }
@@ -357,12 +365,13 @@ func TestUpdateMainProject_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{
-		Workspace:   tmp,
-		Concurrency: 2,
-		Modules:     []config.Module{{Name: "m1", URL: "git@test/m1.git"}},
+		Workspace:    tmp,
+		DefaultBase:  "develop",
+		Concurrency:  2,
+		Modules:      []config.Module{{Name: "m1", URL: "git@test/m1.git"}},
 	}
 	mock := &MockGitClient{
-		RebaseFunc: func(ctx context.Context, path string) error {
+		FetchAndSwitchBranchFunc: func(ctx context.Context, repoPath, branch string) error {
 			return nil
 		},
 	}
@@ -383,15 +392,16 @@ func TestUpdateMainProject_PartialFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{
-		Workspace:   tmp,
-		Concurrency: 2,
-		Modules:     []config.Module{{Name: "m1", URL: "git@test/m1.git"}},
+		Workspace:    tmp,
+		DefaultBase:  "develop",
+		Concurrency:  2,
+		Modules:      []config.Module{{Name: "m1", URL: "git@test/m1.git"}},
 	}
-	rebaseErr := errors.New("rebase failed")
+	switchErr := errors.New("switch failed")
 	mock := &MockGitClient{
-		RebaseFunc: func(ctx context.Context, path string) error {
-			if strings.Contains(path, "m1") {
-				return rebaseErr
+		FetchAndSwitchBranchFunc: func(ctx context.Context, repoPath, branch string) error {
+			if strings.Contains(repoPath, "m1") {
+				return switchErr
 			}
 			return nil
 		},
@@ -401,8 +411,8 @@ func TestUpdateMainProject_PartialFailure(t *testing.T) {
 	if success != 1 {
 		t.Errorf("expected success 1 (main only), got %d", success)
 	}
-	if len(failed) != 1 || failed["m1"] != rebaseErr {
-		t.Errorf("expected failed[m1]=rebaseErr, got failed=%v", failed)
+	if len(failed) != 1 || failed["m1"] != switchErr {
+		t.Errorf("expected failed[m1]=switchErr, got failed=%v", failed)
 	}
 }
 

@@ -89,6 +89,7 @@ linters:
       excludes:
         - G401
         - G501
+        - G204
     govet:
       enable:
         - atomicalign

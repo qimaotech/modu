@@ -177,6 +177,42 @@ func (g *GitProxy) Rebase(ctx context.Context, path string) error {
 	return nil
 }
 
+// FetchAndSwitchBranch fetch 并切换到指定分支
+func (g *GitProxy) FetchAndSwitchBranch(ctx context.Context, repoPath, branch string) error {
+	// fetch 所有远程
+	if err := g.Fetch(ctx, repoPath); err != nil {
+		return err
+	}
+
+	// 检查分支是否存在于本地
+	exists := g.BranchExists(ctx, repoPath, branch)
+	if !exists {
+		// 本地不存在，尝试 checkout 到远程分支
+		cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "checkout", "-b", branch, "origin/"+branch)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("[git checkout] failed to create branch %s in %s: %w, output: %s", branch, repoPath, errors.ErrGitExec, string(out))
+		}
+		return nil
+	}
+
+	// 本地已存在，直接 checkout
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "checkout", branch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("[git checkout] failed to switch to branch %s in %s: %w, output: %s", branch, repoPath, errors.ErrGitExec, string(out))
+	}
+
+	// rebase 到远程分支
+	rebaseCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rebase", "origin/"+branch)
+	rebaseOut, err := rebaseCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("[git rebase] failed in %s: %w, output: %s", repoPath, errors.ErrGitExec, string(rebaseOut))
+	}
+
+	return nil
+}
+
 // BranchExists 检查分支是否存在
 func (g *GitProxy) BranchExists(ctx context.Context, repoPath, branch string) bool {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "--verify", branch)

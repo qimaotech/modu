@@ -22,6 +22,8 @@ type GitClient interface {
 	Fetch(ctx context.Context, repoPath string) error
 	// Rebase 在当前路径下执行 git rebase origin/<当前分支>
 	Rebase(ctx context.Context, path string) error
+	// FetchAndSwitchBranch fetch 并切换到指定分支
+	FetchAndSwitchBranch(ctx context.Context, repoPath, branch string) error
 	// BranchExists 检查分支是否存在
 	BranchExists(ctx context.Context, repoPath, branch string) bool
 	// CheckBranchWorktreeStatus 检查分支是否已被 worktree 使用

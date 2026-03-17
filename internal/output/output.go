@@ -41,6 +41,19 @@ type ErrorResponse struct {
 	Data    interface{} `json:"data,omitempty"`
 }
 
+// MainProjectInfo 主项目信息（用于 list -a 输出）
+type MainProjectInfo struct {
+	Name    string         `json:"name"`
+	Branch  string         `json:"branch"`
+	Modules []ModuleStatus `json:"modules"`
+}
+
+// ModuleStatus 模块状态
+type ModuleStatus struct {
+	Name   string `json:"name"`
+	Branch string `json:"branch"`
+}
+
 // Formatter 输出格式化器
 type Formatter struct {
 	format string // "text" or "json"
@@ -151,7 +164,8 @@ func (f *Formatter) FormatError(code, message string, data interface{}) string {
 }
 
 // FormatListResponse 格式化列表响应
-func (f *Formatter) FormatListResponse(envs []core.WorktreeEnv) string {
+// showStatus 控制是否显示模块的 clean/dirty 状态
+func (f *Formatter) FormatListResponse(envs []core.WorktreeEnv, showStatus bool) string {
 	if f.format == "json" {
 		data, err := json.MarshalIndent(envs, "", "  ")
 		if err != nil {
@@ -168,12 +182,51 @@ func (f *Formatter) FormatListResponse(envs []core.WorktreeEnv) string {
 
 		// 输出模块
 		for _, mod := range env.Modules {
-			status := "clean"
-			if mod.IsDirty {
-				status = "dirty"
+			var statusStr string
+			if showStatus {
+				status := "clean"
+				if mod.IsDirty {
+					status = "dirty"
+				}
+				statusStr = fmt.Sprintf(" (%s)", status)
 			}
-			sb.WriteString(fmt.Sprintf("    - %s: %s (%s)\n", mod.Name, mod.Branch, status))
+			sb.WriteString(fmt.Sprintf("    - %s: %s%s\n", mod.Name, mod.Branch, statusStr))
 		}
+	}
+
+	return sb.String()
+}
+
+// FormatMainProjectResponse 格式化主项目信息（用于 list -a）
+// 返回主项目信息字符串，会显示在 Features 列表之前
+func (f *Formatter) FormatMainProjectResponse(mainBranch string, modules []core.ModuleStatus) string {
+	if f.format == "json" {
+		mods := make([]ModuleStatus, len(modules))
+		for i, m := range modules {
+			mods[i] = ModuleStatus{
+				Name:   m.Name,
+				Branch: m.Branch,
+			}
+		}
+		info := MainProjectInfo{
+			Name:    "workspace",
+			Branch:  mainBranch,
+			Modules: mods,
+		}
+		data, err := json.MarshalIndent(info, "", "  ")
+		if err != nil {
+			return `{"error": "failed to marshal response"}`
+		}
+		return string(data)
+	}
+
+	// 文本格式：Workspace [develop]
+	//   - pixiu-ad-backend: develop
+	//   - pixiu-frontend: develop
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Workspace [%s]\n", mainBranch))
+	for _, mod := range modules {
+		sb.WriteString(fmt.Sprintf("  - %s: %s\n", mod.Name, mod.Branch))
 	}
 
 	return sb.String()

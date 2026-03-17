@@ -92,6 +92,8 @@ func main() {
 		Run:   runList,
 	}
 	listCmd.Flags().BoolP("verbose", "v", false, "显示详细信息（模块、分支、状态）")
+	listCmd.Flags().BoolP("status", "s", false, "显示模块状态 (clean/dirty)")
+	listCmd.Flags().BoolP("all", "a", false, "显示主项目 (workspace) 及其模块的分支信息")
 
 	// info 命令
 	infoCmd := &cobra.Command{
@@ -373,6 +375,17 @@ func runDelete(cmd *cobra.Command, args []string) {
 func runList(cmd *cobra.Command, args []string) {
 	eng := loadConfig()
 	formatter := output.New(outputFmt)
+	showStatus, _ := cmd.Flags().GetBool("status")
+	showAll, _ := cmd.Flags().GetBool("all")
+
+	// 如果 -a flag 存在，先显示主项目信息
+	if showAll {
+		main, modules, err := eng.GetMainProjectModules(cmd.Context())
+		if err == nil && main != nil {
+			fmt.Print(formatter.FormatMainProjectResponse(main.Branch, modules))
+			fmt.Println()
+		}
+	}
 
 	envs, err := eng.ListWorktrees(cmd.Context())
 	if err != nil {
@@ -380,7 +393,7 @@ func runList(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Print(formatter.FormatListResponse(envs))
+	fmt.Print(formatter.FormatListResponse(envs, showStatus))
 }
 
 func runInfo(cmd *cobra.Command, args []string) {
@@ -531,7 +544,7 @@ func runStatus(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Print(formatter.FormatListResponse(envs))
+	fmt.Print(formatter.FormatListResponse(envs, true))
 }
 
 func runUpdate(cmd *cobra.Command, args []string) {

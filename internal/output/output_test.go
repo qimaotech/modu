@@ -171,7 +171,7 @@ func TestFormatListResponse_Text(t *testing.T) {
 		},
 	}
 
-	output := formatter.FormatListResponse(envs)
+	output := formatter.FormatListResponse(envs, true)
 
 	if !contains(output, "Features:") {
 		t.Error("expected Features header")
@@ -191,7 +191,7 @@ func TestFormatListResponse_Text(t *testing.T) {
 func TestFormatListResponse_Empty(t *testing.T) {
 	formatter := New("text")
 
-	output := formatter.FormatListResponse([]core.WorktreeEnv{})
+	output := formatter.FormatListResponse([]core.WorktreeEnv{}, false)
 
 	if !contains(output, "Features:") {
 		t.Error("expected Features header")
@@ -205,7 +205,7 @@ func TestFormatListResponse_Json(t *testing.T) {
 		{Name: "feature-1"},
 	}
 
-	output := formatter.FormatListResponse(envs)
+	output := formatter.FormatListResponse(envs, false)
 
 	if !contains(output, `"name"`) || !contains(output, "feature-1") {
 		t.Error("expected feature name in JSON")
@@ -249,6 +249,48 @@ func TestFormatInfoResponse_Json(t *testing.T) {
 
 	if !contains(output, `"name"`) || !contains(output, "feature-1") {
 		t.Error("expected name in JSON")
+	}
+}
+
+// TestFormatMainProjectResponseText 测试文本格式主项目响应
+func TestFormatMainProjectResponseText(t *testing.T) {
+	formatter := New("text")
+	modules := []core.ModuleStatus{
+		{Name: "module1", Branch: "develop", IsDirty: false},
+		{Name: "module2", Branch: "develop", IsDirty: true},
+	}
+
+	output := formatter.FormatMainProjectResponse("develop", modules)
+
+	if !contains(output, "Workspace [develop]") {
+		t.Error("expected Workspace header")
+	}
+	if !contains(output, "module1: develop") {
+		t.Error("expected module1 in output")
+	}
+	if !contains(output, "module2: develop") {
+		t.Error("expected module2 in output")
+	}
+}
+
+// TestFormatMainProjectResponseJson 测试 JSON 格式主项目响应
+func TestFormatMainProjectResponseJson(t *testing.T) {
+	formatter := New("json")
+	modules := []core.ModuleStatus{
+		{Name: "module1", Branch: "develop"},
+		{Name: "module2", Branch: "develop"},
+	}
+
+	output := formatter.FormatMainProjectResponse("develop", modules)
+
+	if !contains(output, `"name"`) || !contains(output, "workspace") {
+		t.Error("expected name in JSON")
+	}
+	if !contains(output, `"branch"`) || !contains(output, "develop") {
+		t.Error("expected branch in JSON")
+	}
+	if !contains(output, `"modules"`) {
+		t.Error("expected modules in JSON")
 	}
 }
 

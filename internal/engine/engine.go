@@ -57,6 +57,12 @@ func NewWithClient(cfg *config.Config, client gitproxy.GitClient) *Engine {
 	}
 }
 
+// featureToDirName 将 feature 名转换为目录名
+// feature/hello → feature-hello
+func featureToDirName(feature string) string {
+	return strings.ReplaceAll(feature, "/", "-")
+}
+
 // Init 并发克隆所有配置的仓库
 func (e *Engine) Init(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
@@ -84,8 +90,11 @@ func (e *Engine) Init(ctx context.Context) error {
 func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error {
 	logger.Info("开始创建 feature: %s, base: %s", feature, base)
 
+	// 将 feature 名转换为目录名（feature/hello → feature-hello）
+	dirName := featureToDirName(feature)
+
 	// 1. 前置检查
-	featurePath := filepath.Join(e.Config.WorktreeRoot, feature)
+	featurePath := filepath.Join(e.Config.WorktreeRoot, dirName)
 	featureExists := false
 	if _, err := os.Stat(featurePath); err == nil {
 		featureExists = true
@@ -232,8 +241,8 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 
 	logger.Info("成功创建 feature: %s", feature)
 
-	// 创建 VSCode workspace 文件
-	if err := e.createVSCodeWorkspace(feature, featurePath); err != nil {
+	// 创建 VSCode workspace 文件（使用目录名）
+	if err := e.createVSCodeWorkspace(dirName, featurePath); err != nil {
 		logger.Warn("创建 VSCode workspace 文件失败: %v", err)
 	}
 
@@ -354,7 +363,9 @@ func (e *Engine) CheckDirty(ctx context.Context, env core.WorktreeEnv) ([]core.M
 func (e *Engine) DeleteWorktree(ctx context.Context, feature string, force bool) error {
 	logger.Info("开始删除 feature: %s, force: %v", feature, force)
 
-	featurePath := filepath.Join(e.Config.WorktreeRoot, feature)
+	// 将 feature 名转换为目录名（feature/hello → feature-hello）
+	dirName := featureToDirName(feature)
+	featurePath := filepath.Join(e.Config.WorktreeRoot, dirName)
 
 	// 检查是否存在
 	if _, err := os.Stat(featurePath); os.IsNotExist(err) {
@@ -488,6 +499,34 @@ func (e *Engine) GetMainProject(ctx context.Context) (*MainProjectStatus, error)
 	}, nil
 }
 
+// GetMainProjectModules 获取主项目及其所有模块的分支状态
+func (e *Engine) GetMainProjectModules(ctx context.Context) (*MainProjectStatus, []core.ModuleStatus, error) {
+	main, err := e.GetMainProject(ctx)
+	if err != nil || main == nil {
+		return nil, nil, err
+	}
+
+	modules := make([]core.ModuleStatus, 0, len(e.Config.Modules))
+	for _, module := range e.Config.Modules {
+		repoPath := filepath.Join(e.Config.Workspace, module.Name)
+		if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+			continue
+		}
+		status, err := e.GitProxy.GetStatus(ctx, repoPath)
+		if err != nil {
+			continue
+		}
+		modules = append(modules, core.ModuleStatus{
+			Name:    module.Name,
+			Path:    repoPath,
+			IsDirty: status.IsDirty,
+			Branch:  status.Branch,
+		})
+	}
+
+	return main, modules, nil
+}
+
 // UpdateMainProject 并发对主项目和所有模块执行 fetch + rebase，返回成功数量和失败 map[name]error
 func (e *Engine) UpdateMainProject(ctx context.Context) (success int, failed map[string]error) {
 	failed = make(map[string]error)
@@ -496,7 +535,8 @@ func (e *Engine) UpdateMainProject(ctx context.Context) (success int, failed map
 
 	mainName := filepath.Base(e.Config.Workspace)
 	g.Go(func() error {
-		if err := e.GitProxy.Rebase(ctx, e.Config.Workspace); err != nil {
+		// 主项目切换到 default-base 分支
+		if err := e.GitProxy.FetchAndSwitchBranch(ctx, e.Config.Workspace, e.Config.DefaultBase); err != nil {
 			failed[mainName] = err
 		}
 		return nil
@@ -508,8 +548,13 @@ func (e *Engine) UpdateMainProject(ctx context.Context) (success int, failed map
 		if _, err := os.Stat(repoPath); os.IsNotExist(err) {
 			continue
 		}
+		// 使用模块的 base-branch（如果有）或全局 default-base
+		baseBranch := module.BaseBranch
+		if baseBranch == "" {
+			baseBranch = e.Config.DefaultBase
+		}
 		g.Go(func() error {
-			if err := e.GitProxy.Rebase(ctx, repoPath); err != nil {
+			if err := e.GitProxy.FetchAndSwitchBranch(ctx, repoPath, baseBranch); err != nil {
 				failed[module.Name] = err
 			}
 			return nil
@@ -535,7 +580,9 @@ func (e *Engine) UpdateMainProject(ctx context.Context) (success int, failed map
 // UpdateWorktree 对指定 feature 的 worktree（主项目 + 该目录下存在的模块）并发执行 fetch + rebase
 func (e *Engine) UpdateWorktree(ctx context.Context, feature string) (success int, failed map[string]error) {
 	failed = make(map[string]error)
-	featurePath := filepath.Join(e.Config.WorktreeRoot, feature)
+	// 将 feature 名转换为目录名（feature/hello → feature-hello）
+	dirName := featureToDirName(feature)
+	featurePath := filepath.Join(e.Config.WorktreeRoot, dirName)
 	if _, err := os.Stat(featurePath); os.IsNotExist(err) {
 		return 0, failed
 	}
@@ -600,8 +647,15 @@ func (e *Engine) ListWorktrees(ctx context.Context) ([]core.WorktreeEnv, error) 
 		if !entry.IsDir() {
 			continue
 		}
+
+		// 跳过以 . 开头的隐藏目录
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+
+		// 直接使用目录名作为 feature 名
 		feature := entry.Name()
-		featurePath := filepath.Join(e.Config.WorktreeRoot, feature)
+		featurePath := filepath.Join(e.Config.WorktreeRoot, entry.Name())
 
 		env := core.WorktreeEnv{
 			Name:        feature,
@@ -679,6 +733,11 @@ func (e *Engine) ListWorktrees(ctx context.Context) ([]core.WorktreeEnv, error) 
 			})
 		}
 
+		// 跳过没有主项目的目录（无效的 feature）
+		if env.MainProject == nil {
+			continue
+		}
+
 		envs = append(envs, env)
 	}
 
@@ -687,7 +746,9 @@ func (e *Engine) ListWorktrees(ctx context.Context) ([]core.WorktreeEnv, error) 
 
 // GetWorktreeInfo 获取单个 feature 的详情
 func (e *Engine) GetWorktreeInfo(ctx context.Context, feature string) (*core.WorktreeEnv, error) {
-	featurePath := filepath.Join(e.Config.WorktreeRoot, feature)
+	// 将 feature 名转换为目录名（feature/hello → feature-hello）
+	dirName := featureToDirName(feature)
+	featurePath := filepath.Join(e.Config.WorktreeRoot, dirName)
 
 	if _, err := os.Stat(featurePath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("feature %s not found: %w", feature, errs.ErrFeatureNotFound)
@@ -778,7 +839,9 @@ func (e *Engine) AddModule(ctx context.Context, feature, moduleName string) erro
 		return fmt.Errorf("module %s not found in config", moduleName)
 	}
 
-	featurePath := filepath.Join(e.Config.WorktreeRoot, feature)
+	// 将 feature 名转换为目录名（feature/hello → feature-hello）
+	dirName := featureToDirName(feature)
+	featurePath := filepath.Join(e.Config.WorktreeRoot, dirName)
 
 	// 检查 feature 是否存在
 	if _, err := os.Stat(featurePath); os.IsNotExist(err) {
@@ -828,8 +891,8 @@ func (e *Engine) AddModule(ctx context.Context, feature, moduleName string) erro
 		}
 		logger.Info("成功为 feature %s 添加模块: %s", feature, moduleName)
 
-		// 更新 VSCode workspace 文件
-		if err := e.createVSCodeWorkspace(feature, featurePath); err != nil {
+		// 更新 VSCode workspace 文件（使用目录名）
+		if err := e.createVSCodeWorkspace(dirName, featurePath); err != nil {
 			logger.Warn("更新 VSCode workspace 文件失败: %v", err)
 		}
 		return nil
@@ -842,8 +905,8 @@ func (e *Engine) AddModule(ctx context.Context, feature, moduleName string) erro
 
 	logger.Info("成功为 feature %s 添加模块: %s", feature, moduleName)
 
-	// 更新 VSCode workspace 文件
-	if err := e.createVSCodeWorkspace(feature, featurePath); err != nil {
+	// 更新 VSCode workspace 文件（使用目录名）
+	if err := e.createVSCodeWorkspace(dirName, featurePath); err != nil {
 		logger.Warn("更新 VSCode workspace 文件失败: %v", err)
 	}
 	return nil
@@ -853,7 +916,9 @@ func (e *Engine) AddModule(ctx context.Context, feature, moduleName string) erro
 func (e *Engine) RemoveModule(ctx context.Context, feature, moduleName string) error {
 	logger.Info("为 feature %s 删除模块: %s", feature, moduleName)
 
-	featurePath := filepath.Join(e.Config.WorktreeRoot, feature)
+	// 将 feature 名转换为目录名（feature/hello → feature-hello）
+	dirName := featureToDirName(feature)
+	featurePath := filepath.Join(e.Config.WorktreeRoot, dirName)
 
 	// 检查 feature 是否存在
 	if _, err := os.Stat(featurePath); os.IsNotExist(err) {
@@ -899,8 +964,8 @@ func (e *Engine) RemoveModule(ctx context.Context, feature, moduleName string) e
 
 	logger.Info("成功为 feature %s 删除模块: %s", feature, moduleName)
 
-	// 更新 VSCode workspace 文件
-	if err := e.createVSCodeWorkspace(feature, featurePath); err != nil {
+	// 更新 VSCode workspace 文件（使用目录名）
+	if err := e.createVSCodeWorkspace(dirName, featurePath); err != nil {
 		logger.Warn("更新 VSCode workspace 文件失败: %v", err)
 	}
 	return nil
