@@ -12,7 +12,7 @@
 | `info`   | 查看 feature 详情                |
 | `init`   | 初始化仓库（克隆所有配置的仓库） |
 | `status` | 显示所有模块的脏状态             |
-| `update` | 更新代码（fetch + rebase）       |
+| `update` | 更新代码（主项目切换到 default-base 分支） |
 | `config` | 配置管理（创建/扫描）           |
 | `tui`    | 启动交互式 TUI 界面              |
 | `version`| 显示版本信息                     |
@@ -51,7 +51,7 @@ modules:
 | -------------------- | ---- | ------------------------- |
 | `workspace`          | 是   | 裸仓库/主仓库所在目录     |
 | `worktree-root`      | 是   | 特性分支代码存放目录      |
-| `default-base`       | 是   | 默认基准分支 (如 develop) |
+| `default-base`       | 是   | 默认基准分支 (如 develop)，`modu update` 主项目时会切换到此分支 |
 | `concurrency`        | 否   | 并发数，默认 5            |
 | `auto-fetch`         | 否   | 操作前自动 fetch          |
 | `strict-dirty-check` | 否   | 删除前强制脏检查          |
@@ -110,6 +110,7 @@ modu create my-feature --modules frontend,backend  # 只创建指定模块
 # 列出所有 worktree
 modu list
 modu list -v  # 显示详细信息（模块、分支、状态）
+modu list -a  # 显示主项目 (workspace) 及其模块的分支信息
 
 # 查看详情
 modu info my-feature
@@ -132,8 +133,8 @@ modu
 modu tui
 
 # 更新代码（主项目或 feature）
-modu update                    # 更新主项目（workspace + 所有模块）
-modu update my-feature         # 更新指定 feature 的 worktree
+modu update                    # 更新主项目和所有模块（自动切换到 default-base 分支）
+modu update my-feature         # 更新指定 feature 的 worktree（保持当前分支）
 
 # 配置管理
 modu config create                           # 交互式创建配置文件
