@@ -18,22 +18,40 @@ import (
 var (
 	headerStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("86")).
-			Background(lipgloss.Color("236")).
-			Padding(0, 1)
+			Foreground(lipgloss.AdaptiveColor{
+			Dark:  "86", // 浅青色 - 深色背景
+			Light: "25", // 深蓝色 - 浅色背景
+		}).
+		Background(lipgloss.AdaptiveColor{
+			Dark:  "236", // 深灰 - 深色背景
+			Light: "254", // 浅灰 - 浅色背景
+		}).
+		Padding(0, 1)
 
 	itemStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("252"))
+			Foreground(lipgloss.AdaptiveColor{
+			Dark:  "252", // 浅灰 - 深色背景
+			Light: "238", // 深灰 - 浅色背景
+		})
 
 	selectedItemStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("86")).
-				Bold(true)
+				Foreground(lipgloss.AdaptiveColor{
+			Dark:  "86", // 浅青色 - 深色背景
+			Light: "21", // 蓝色 - 浅色背景
+		}).
+		Bold(true)
 
 	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("196"))
+			Foreground(lipgloss.AdaptiveColor{
+			Dark:  "196", // 红色 - 深色背景
+			Light: "196", // 红色 - 浅色背景
+		})
 
 	successStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("82"))
+			Foreground(lipgloss.AdaptiveColor{
+			Dark:  "82", // 绿色 - 深色背景
+			Light: "28", // 深绿 - 浅色背景
+		})
 )
 
 // ListEntry 列表项统一接口（主项目或 feature）
