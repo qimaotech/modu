@@ -317,54 +317,52 @@ func readGitRemoteURL(gitConfigPath string) (string, error) {
 	return "", fmt.Errorf("remote origin not found")
 }
 
-// UpdateGitignore 更新主项目的 .gitignore，添加模块目录
+// UpdateGitignore 更新主项目的 .gitignore，添加模块目录（去重）
 func UpdateGitignore(workspacePath string, modules []Module) error {
 	gitignorePath := filepath.Join(workspacePath, ".gitignore")
-	var existingEntries []string
-
-	// 读取现有的 .gitignore
-	if data, err := os.ReadFile(gitignorePath); err == nil {
-		existingEntries = strings.Split(strings.TrimSpace(string(data)), "\n")
-	}
 
 	// 收集需要添加的模块名
-	entriesToAdd := make(map[string]bool)
+	modulesToAdd := make(map[string]bool)
 	for _, m := range modules {
-		entriesToAdd[m.Name] = true
+		modulesToAdd[m.Name] = true
 	}
 
-	// 检查是否需要添加新条目
-	needsUpdate := false
-	for name := range entriesToAdd {
-		found := false
-		for _, entry := range existingEntries {
-			entry = strings.TrimSpace(entry)
-			if entry == name || entry == name+"/" {
-				found = true
-				break
-			}
-		}
-		if !found {
-			needsUpdate = true
-			break
+	// 读取现有的 .gitignore
+	var existingContent string
+	if data, err := os.ReadFile(gitignorePath); err == nil {
+		existingContent = string(data)
+	}
+
+	// 解析现有条目，建立已有模块的集合
+	existingModules := make(map[string]bool)
+	for line := range strings.SplitSeq(existingContent, "\n") {
+		line = strings.TrimSpace(line)
+		// 匹配 "module/" 或 "module" 格式
+		if name, ok := strings.CutSuffix(line, "/"); ok {
+			existingModules[name] = true
+		} else if line != "" && !strings.HasPrefix(line, "#") {
+			existingModules[line] = true
 		}
 	}
 
-	if !needsUpdate {
+	// 找出需要添加的模块（去重）
+	var toAdd []string
+	for name := range modulesToAdd {
+		if !existingModules[name] {
+			toAdd = append(toAdd, name)
+		}
+	}
+
+	// 如果没有需要添加的模块，直接返回
+	if len(toAdd) == 0 {
 		return nil
 	}
 
-	// 追加新条目
+	// 构建新的 .gitignore 内容
 	var newContent strings.Builder
-	if _, err := os.Stat(gitignorePath); err == nil {
-		// 文件存在，读取内容
-		data, _ := os.ReadFile(gitignorePath)
-		newContent.WriteString(strings.TrimSpace(string(data)))
-	}
-
-	// 添加模块目录
+	newContent.WriteString(strings.TrimSpace(existingContent))
 	newContent.WriteString("\n\n# modu modules\n")
-	for name := range entriesToAdd {
+	for _, name := range toAdd {
 		newContent.WriteString(name + "/\n")
 	}
 

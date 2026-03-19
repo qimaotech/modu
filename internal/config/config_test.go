@@ -570,3 +570,406 @@ modules:
 		t.Errorf("expected worktree-root /opt/worktrees, got %s", cfg.WorktreeRoot)
 	}
 }
+
+// TestLoadConfigForScan 测试加载配置用于scan命令
+func TestLoadConfigForScan(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, ".modu.yaml")
+	content := `workspace: /opt/workspace
+worktree-root: /opt/worktrees
+default-base: develop
+`
+
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	cfg, err := LoadConfigForScan(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Workspace != "/opt/workspace" {
+		t.Errorf("expected workspace /opt/workspace, got %s", cfg.Workspace)
+	}
+	if len(cfg.Modules) != 0 {
+		t.Errorf("expected 0 modules, got %d", len(cfg.Modules))
+	}
+}
+
+// TestLoadConfigForScan_ValidationError 测试加载配置跳过模块但仍验证基础字段
+func TestLoadConfigForScan_ValidationError(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, ".modu.yaml")
+	content := `workspace: /opt/workspace
+`
+
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	_, err := LoadConfigForScan(configPath)
+	if err == nil {
+		t.Error("expected error for missing worktree-root and default-base")
+	}
+}
+
+// TestResolveEnvVars 测试环境变量解析
+func TestResolveEnvVars(t *testing.T) {
+	t.Run("无环境变量", func(t *testing.T) {
+		value := "/path/to/dir"
+		err := resolveEnvVars(&value, "test")
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if value != "/path/to/dir" {
+			t.Errorf("expected /path/to/dir, got %s", value)
+		}
+	})
+
+	t.Run("环境变量已定义", func(t *testing.T) {
+		os.Setenv("TEST_MODU_PATH", "/test/path")
+		defer os.Unsetenv("TEST_MODU_PATH")
+
+		value := "$TEST_MODU_PATH/subdir"
+		err := resolveEnvVars(&value, "test")
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if value != "/test/path/subdir" {
+			t.Errorf("expected /test/path/subdir, got %s", value)
+		}
+	})
+
+	t.Run("环境变量未定义", func(t *testing.T) {
+		os.Unsetenv("UNDEFINED_VAR")
+		value := "$UNDEFINED_VAR/subdir"
+		err := resolveEnvVars(&value, "test")
+		if err == nil {
+			t.Error("expected error for undefined environment variable")
+		}
+	})
+
+	t.Run("环境变量使用花括号语法", func(t *testing.T) {
+		os.Setenv("TEST_HOOK_PATH", "/hooks")
+		defer os.Unsetenv("TEST_HOOK_PATH")
+
+		value := "${TEST_HOOK_PATH}/scripts"
+		err := resolveEnvVars(&value, "test")
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if value != "/hooks/scripts" {
+			t.Errorf("expected /hooks/scripts, got %s", value)
+		}
+	})
+}
+
+// TestExtractUndefinedVars 测试提取未定义的环境变量
+func TestExtractUndefinedVars(t *testing.T) {
+	t.Run("提取未定义的环境变量", func(t *testing.T) {
+		os.Setenv("DEFINED_VAR", "value")
+		defer os.Unsetenv("DEFINED_VAR")
+
+		undefined := extractUndefinedVars("$DEFINED_VAR/${OTHER_UNDEFINED}")
+		if len(undefined) != 1 {
+			t.Errorf("expected 1 undefined var, got %d", len(undefined))
+		}
+	})
+
+	t.Run("无环境变量", func(t *testing.T) {
+		undefined := extractUndefinedVars("/path/to/dir")
+		if len(undefined) != 0 {
+			t.Errorf("expected 0 undefined vars, got %d", len(undefined))
+		}
+	})
+
+	t.Run("多个未定义变量只返回一次", func(t *testing.T) {
+		os.Unsetenv("VAR1")
+		os.Unsetenv("VAR2")
+		undefined := extractUndefinedVars("$VAR1 $VAR2 $VAR1")
+		if len(undefined) != 2 {
+			t.Errorf("expected 2 unique undefined vars, got %d", len(undefined))
+		}
+	})
+}
+
+// TestValidate 测试配置验证
+func TestValidate(t *testing.T) {
+	t.Run("有效配置", func(t *testing.T) {
+		cfg := &Config{
+			Workspace:    "/workspace",
+			WorktreeRoot: "/worktrees",
+			DefaultBase:  "develop",
+			Modules:      []Module{{Name: "m1", URL: "url"}},
+		}
+		err := validate(cfg)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("workspace为空", func(t *testing.T) {
+		cfg := &Config{
+			WorktreeRoot: "/worktrees",
+			DefaultBase:  "develop",
+			Modules:      []Module{{Name: "m1", URL: "url"}},
+		}
+		err := validate(cfg)
+		if err == nil {
+			t.Error("expected error for empty workspace")
+		}
+	})
+
+	t.Run("worktreeRoot为空", func(t *testing.T) {
+		cfg := &Config{
+			Workspace:   "/workspace",
+			DefaultBase: "develop",
+			Modules:     []Module{{Name: "m1", URL: "url"}},
+		}
+		err := validate(cfg)
+		if err == nil {
+			t.Error("expected error for empty worktreeRoot")
+		}
+	})
+
+	t.Run("defaultBase为空", func(t *testing.T) {
+		cfg := &Config{
+			Workspace:    "/workspace",
+			WorktreeRoot: "/worktrees",
+			Modules:      []Module{{Name: "m1", URL: "url"}},
+		}
+		err := validate(cfg)
+		if err == nil {
+			t.Error("expected error for empty defaultBase")
+		}
+	})
+
+	t.Run("modules为空", func(t *testing.T) {
+		cfg := &Config{
+			Workspace:    "/workspace",
+			WorktreeRoot: "/worktrees",
+			DefaultBase:  "develop",
+			Modules:      []Module{},
+		}
+		err := validate(cfg)
+		if err == nil {
+			t.Error("expected error for empty modules")
+		}
+	})
+}
+
+// TestValidateBasic 测试基础配置验证
+func TestValidateBasic(t *testing.T) {
+	t.Run("有效配置", func(t *testing.T) {
+		cfg := &Config{
+			Workspace:    "/workspace",
+			WorktreeRoot: "/worktrees",
+			DefaultBase:  "develop",
+		}
+		err := validateBasic(cfg)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("缺少workspace", func(t *testing.T) {
+		cfg := &Config{
+			WorktreeRoot: "/worktrees",
+			DefaultBase:  "develop",
+		}
+		err := validateBasic(cfg)
+		if err == nil {
+			t.Error("expected error for missing workspace")
+		}
+	})
+
+	t.Run("缺少worktreeRoot", func(t *testing.T) {
+		cfg := &Config{
+			Workspace:   "/workspace",
+			DefaultBase: "develop",
+		}
+		err := validateBasic(cfg)
+		if err == nil {
+			t.Error("expected error for missing worktreeRoot")
+		}
+	})
+
+	t.Run("缺少defaultBase", func(t *testing.T) {
+		cfg := &Config{
+			Workspace:    "/workspace",
+			WorktreeRoot: "/worktrees",
+		}
+		err := validateBasic(cfg)
+		if err == nil {
+			t.Error("expected error for missing defaultBase")
+		}
+	})
+}
+
+// TestReadGitRemoteURL 测试读取git远程URL
+func TestReadGitRemoteURL(t *testing.T) {
+	t.Run("读取有效的git配置", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		gitConfig := filepath.Join(tmpDir, "config")
+		content := `[core]
+	repositoryformatversion = 0
+[remote "origin"]
+	url = https://github.com/example/repo.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+`
+		err := os.WriteFile(gitConfig, []byte(content), 0644)
+		if err != nil {
+			t.Fatalf("failed to write test config: %v", err)
+		}
+
+		url, err := readGitRemoteURL(gitConfig)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if url != "https://github.com/example/repo.git" {
+			t.Errorf("expected URL https://github.com/example/repo.git, got %s", url)
+		}
+	})
+
+	t.Run("无remote origin", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		gitConfig := filepath.Join(tmpDir, "config")
+		content := `[core]
+	repositoryformatversion = 0
+`
+		err := os.WriteFile(gitConfig, []byte(content), 0644)
+		if err != nil {
+			t.Fatalf("failed to write test config: %v", err)
+		}
+
+		_, err = readGitRemoteURL(gitConfig)
+		if err == nil {
+			t.Error("expected error for missing remote origin")
+		}
+	})
+
+	t.Run("文件不存在", func(t *testing.T) {
+		_, err := readGitRemoteURL("/path/that/does/not/exist")
+		if err == nil {
+			t.Error("expected error for non-existent file")
+		}
+	})
+}
+
+// TestUpdateGitignore 测试更新gitignore
+func TestUpdateGitignore(t *testing.T) {
+	t.Run("创建新的gitignore", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		modules := []Module{
+			{Name: "module1"},
+			{Name: "module2"},
+		}
+
+		err := UpdateGitignore(tmpDir, modules)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+
+		content, err := os.ReadFile(filepath.Join(tmpDir, ".gitignore"))
+		if err != nil {
+			t.Fatalf("failed to read .gitignore: %v", err)
+		}
+		if !contains(string(content), "module1/") {
+			t.Error("expected .gitignore to contain module1/")
+		}
+		if !contains(string(content), "module2/") {
+			t.Error("expected .gitignore to contain module2/")
+		}
+	})
+
+	t.Run("追加到已存在的gitignore", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		gitignorePath := filepath.Join(tmpDir, ".gitignore")
+
+		existing := "# existing\ngo/\n"
+		os.WriteFile(gitignorePath, []byte(existing), 0644)
+
+		modules := []Module{{Name: "module1"}}
+
+		err := UpdateGitignore(tmpDir, modules)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+
+		content, _ := os.ReadFile(gitignorePath)
+		if !contains(string(content), "# existing") {
+			t.Error("expected .gitignore to preserve existing content")
+		}
+		if !contains(string(content), "module1/") {
+			t.Error("expected .gitignore to contain module1/")
+		}
+	})
+
+	t.Run("去重已有模块", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		gitignorePath := filepath.Join(tmpDir, ".gitignore")
+
+		existing := "module1/\nmodule2/\n"
+		os.WriteFile(gitignorePath, []byte(existing), 0644)
+
+		modules := []Module{
+			{Name: "module1"},
+			{Name: "module3"},
+		}
+
+		err := UpdateGitignore(tmpDir, modules)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+
+		content, _ := os.ReadFile(gitignorePath)
+		// module1 应该只出现一次
+		count := countOccurrences(string(content), "module1/")
+		if count != 1 {
+			t.Errorf("expected module1/ to appear once, got %d", count)
+		}
+		// module3 应该出现一次
+		count = countOccurrences(string(content), "module3/")
+		if count != 1 {
+			t.Errorf("expected module3/ to appear once, got %d", count)
+		}
+	})
+}
+
+// TestSaveConfig_AutoCreateWorktreeDir 测试保存配置时自动创建worktree目录
+func TestSaveConfig_AutoCreateWorktreeDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "subdir", ".modu.yaml")
+	worktreesDir := filepath.Join(tmpDir, "subdir", "worktrees")
+
+	os.MkdirAll(filepath.Dir(configPath), 0755)
+
+	cfg := &Config{
+		Workspace:    tmpDir,
+		WorktreeRoot: "worktrees",
+		DefaultBase:  "develop",
+	}
+
+	err := SaveConfig(cfg, configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 验证 worktree 目录已创建
+	if _, err := os.Stat(worktreesDir); os.IsNotExist(err) {
+		t.Error("expected worktree directory to be created")
+	}
+}
+
+// 辅助函数
+func countOccurrences(s, substr string) int {
+	count := 0
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			count++
+		}
+	}
+	return count
+}
