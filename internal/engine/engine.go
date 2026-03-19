@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"golang.org/x/sync/errgroup"
 
@@ -112,9 +113,29 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 
 	// 3. 如果 feature 不存在，先创建主项目的 worktree
 	if !featureExists {
-		err := e.GitProxy.CreateWorktree(ctx, e.Config.Workspace, feature, base, mainProjectPath)
-		if err != nil {
-			return fmt.Errorf("failed to create worktree for main project: %w", err)
+		// 先检查主项目的分支是否已存在
+		mainBranchExists := e.GitProxy.BranchExists(ctx, e.Config.Workspace, feature)
+		if mainBranchExists {
+			// 分支已存在，检查是否被其他 worktree 使用
+			isUsed, err := e.GitProxy.CheckBranchWorktreeStatus(ctx, e.Config.Workspace, feature)
+			if err != nil {
+				return fmt.Errorf("failed to check branch worktree status for main project: %w", err)
+			}
+			if isUsed {
+				return fmt.Errorf("分支 %s 已被其他 worktree 使用: %w", feature, errs.ErrFeatureExists)
+			}
+			// 分支存在但未被使用，复用现有分支
+			logger.Info("主项目复用现有分支 %s 创建 worktree", feature)
+			err = e.GitProxy.CreateWorktreeFromExistingBranch(ctx, e.Config.Workspace, feature, mainProjectPath)
+			if err != nil {
+				return fmt.Errorf("failed to create worktree for main project: %w", err)
+			}
+		} else {
+			// 分支不存在，创建新分支
+			err := e.GitProxy.CreateWorktree(ctx, e.Config.Workspace, feature, base, mainProjectPath)
+			if err != nil {
+				return fmt.Errorf("failed to create worktree for main project: %w", err)
+			}
 		}
 	}
 
@@ -163,6 +184,20 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 				results <- worktreeResult{module: module, path: worktreePath, repoPath: repoPath, err: err}
 				if err != nil {
 					return fmt.Errorf("failed to create worktree for %s: %w", module.Name, err)
+				}
+				return nil
+			}
+
+			// 本地分支不存在，检查远程是否有该分支
+			// 如果远程已存在该分支，直接从远程分支创建 worktree，无需本地有该分支
+			remoteHasBranch := e.GitProxy.RemoteBranchExists(ctx, module.URL, feature)
+			if remoteHasBranch {
+				// 远程有该分支，直接从远程分支创建 worktree（不需要后续 pull）
+				logger.Info("远程已有分支 %s，从远程创建 worktree: module=%s", feature, module.Name)
+				err := e.GitProxy.CreateWorktreeFromRemoteBranch(ctx, repoPath, feature, worktreePath)
+				results <- worktreeResult{module: module, path: worktreePath, repoPath: repoPath, err: err}
+				if err != nil {
+					return fmt.Errorf("failed to create worktree from remote branch for %s: %w", module.Name, err)
 				}
 				return nil
 			}
@@ -810,6 +845,35 @@ func (e *Engine) GetWorktreeInfo(ctx context.Context, feature string) (*core.Wor
 	}
 
 	return env, nil
+}
+
+// GetModulesWithRemoteBranch 并发查询所有子模块的远端是否存在指定分支
+func (e *Engine) GetModulesWithRemoteBranch(ctx context.Context, branch string) (map[string]bool, error) {
+	result := make(map[string]bool)
+	var mu sync.Mutex
+
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(e.Config.Concurrency)
+
+	for _, module := range e.Config.Modules {
+		module := module
+		g.Go(func() error {
+			exists := e.GitProxy.RemoteBranchExists(ctx, module.URL, branch)
+			if exists {
+				mu.Lock()
+				result[module.Name] = true
+				mu.Unlock()
+			}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		// 查询失败时返回空 map 和错误（graceful degradation 由调用者处理）
+		return make(map[string]bool), err
+	}
+
+	return result, nil
 }
 
 // configuredModuleNames 返回配置中模块名称集合，用于区分「配置内模块」与普通目录（如 .claude、openspec）

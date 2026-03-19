@@ -310,7 +310,7 @@ func (m *App) initModuleSelector() {
 	}
 
 	// 创建模块选择器，预先选中已存在的模块
-	m.moduleSelector = NewModuleSelector(m.Engine.Config.Modules, existingModules)
+	m.moduleSelector = NewModuleSelector(m.Engine.Config.Modules, existingModules, nil)
 	m.moduleCursor = 0
 }
 
@@ -729,13 +729,14 @@ func StartTUI(configPath string) error {
 
 // SelectModules 让用户选择模块（空格选中，上下键切换，回车确认）
 // existingModules: 已存在的模块列表，这些模块会被预先选中
+// remoteHasBranch: 远端是否有该分支的模块，预先选中这些模块
 // 返回: 选中的模块列表, 用户是否按 q/ctrl+c 退出
-func SelectModules(modules []config.Module, existingModules []string) ([]config.Module, bool, error) {
+func SelectModules(modules []config.Module, existingModules []string, remoteHasBranch map[string]bool) ([]config.Module, bool, error) {
 	if len(modules) == 0 {
 		return modules, false, nil
 	}
 
-	p := tea.NewProgram(NewModuleSelector(modules, existingModules))
+	p := tea.NewProgram(NewModuleSelector(modules, existingModules, remoteHasBranch))
 	result, runErr := p.Run()
 	if runErr != nil {
 		return nil, false, fmt.Errorf("failed to run module selector: %w", runErr)
@@ -754,7 +755,7 @@ type ModuleSelector struct {
 	quitting bool
 }
 
-func NewModuleSelector(modules []config.Module, existingModules []string) *ModuleSelector {
+func NewModuleSelector(modules []config.Module, existingModules []string, remoteHasBranch map[string]bool) *ModuleSelector {
 	selected := make([]bool, len(modules))
 
 	// 创建已存在模块的 map
@@ -763,9 +764,14 @@ func NewModuleSelector(modules []config.Module, existingModules []string) *Modul
 		existingMap[name] = true
 	}
 
-	// 预先选中已存在的模块
+	// 确保 remoteHasBranch 不为 nil，避免空指针
+	if remoteHasBranch == nil {
+		remoteHasBranch = make(map[string]bool)
+	}
+
+	// 预先选中已存在的模块或远端有该分支的模块
 	for i, m := range modules {
-		if existingMap[m.Name] {
+		if existingMap[m.Name] || remoteHasBranch[m.Name] {
 			selected[i] = true
 		}
 	}

@@ -2,6 +2,9 @@ package gitproxy
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -163,5 +166,97 @@ branch refs/heads/feature/add-auth
 				}
 			}
 		})
+	}
+}
+
+func TestRemoteBranchExists_BranchExists(t *testing.T) {
+	// 创建临时目录作为测试仓库
+	tmpDir := t.TempDir()
+	repoPath := filepath.Join(tmpDir, "test-repo")
+
+	// 初始化一个 git 仓库
+	if err := os.MkdirAll(repoPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("git", "init", repoPath)
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 创建一个提交
+	if err := os.WriteFile(filepath.Join(repoPath, "test.txt"), []byte("test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("git", "-C", repoPath, "add", ".")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("git", "-C", repoPath, "commit", "-m", "initial")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 创建一个分支
+	cmd = exec.Command("git", "-C", repoPath, "branch", "test-branch")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	g := &GitProxy{}
+	exists := g.RemoteBranchExists(context.Background(), repoPath, "test-branch")
+	if !exists {
+		t.Error("expected branch to exist")
+	}
+}
+
+func TestRemoteBranchExists_BranchNotExists(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoPath := filepath.Join(tmpDir, "test-repo")
+
+	// 初始化一个 git 仓库
+	if err := os.MkdirAll(repoPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("git", "init", repoPath)
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 创建一个提交
+	if err := os.WriteFile(filepath.Join(repoPath, "test.txt"), []byte("test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("git", "-C", repoPath, "add", ".")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("git", "-C", repoPath, "commit", "-m", "initial")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	g := &GitProxy{}
+	exists := g.RemoteBranchExists(context.Background(), repoPath, "nonexistent-branch")
+	if exists {
+		t.Error("expected branch to not exist")
+	}
+}
+
+func TestRemoteBranchExists_RepoNotExists(t *testing.T) {
+	g := &GitProxy{}
+	exists := g.RemoteBranchExists(context.Background(), "/nonexistent/repo", "main")
+	if exists {
+		t.Error("expected false for nonexistent repo")
+	}
+}
+
+func TestRemoteBranchExists_NetworkError(t *testing.T) {
+	g := &GitProxy{}
+	// 使用无效的网络地址
+	exists := g.RemoteBranchExists(context.Background(), "git@192.0.2.1:nonexistent/repo.git", "main")
+	if exists {
+		t.Error("expected false for network error")
 	}
 }

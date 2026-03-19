@@ -13,6 +13,7 @@ import (
 	"github.com/qimaotech/modu/internal/engine"
 	"github.com/qimaotech/modu/internal/errors"
 	"github.com/qimaotech/modu/internal/i18n"
+	"github.com/qimaotech/modu/internal/logger"
 	"github.com/qimaotech/modu/internal/output"
 	"github.com/qimaotech/modu/internal/ui"
 
@@ -289,7 +290,14 @@ func runCreate(cmd *cobra.Command, args []string) {
 	if len(modules) == 0 {
 		if isInteractiveTerminal() {
 			// 交互式终端：使用 TUI 选择
-			selectedModules, isQuit, err := ui.SelectModules(eng.Config.Modules, existingModules)
+			// 先查询远端分支状态，用于预选
+			remoteHasBranch, err := eng.GetModulesWithRemoteBranch(cmd.Context(), feature)
+			if err != nil {
+				logger.Warn("查询远端分支失败: %v", err)
+				remoteHasBranch = make(map[string]bool)
+			}
+
+			selectedModules, isQuit, err := ui.SelectModules(eng.Config.Modules, existingModules, remoteHasBranch)
 			if err != nil {
 				// TUI 不可用时回退到非交互模式
 				fmt.Fprintf(os.Stderr, "TUI 不可用: %v\n", err)

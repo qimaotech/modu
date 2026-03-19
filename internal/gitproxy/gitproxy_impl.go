@@ -219,6 +219,32 @@ func (g *GitProxy) BranchExists(ctx context.Context, repoPath, branch string) bo
 	return cmd.Run() == nil
 }
 
+// RemoteBranchExists 检查远端仓库是否存在指定分支
+func (g *GitProxy) RemoteBranchExists(ctx context.Context, repoURL, branch string) bool {
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", repoURL, "refs/heads/"+branch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	// 如果输出不为空，说明分支存在
+	return len(strings.TrimSpace(string(out))) > 0
+}
+
+// CreateWorktreeFromRemoteBranch 从远程分支创建 worktree（不创建新分支）
+func (g *GitProxy) CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
+	// 先 fetch 确保远程分支信息最新
+	if err := g.Fetch(ctx, repoPath); err != nil {
+		return err
+	}
+	// 直接从远程分支创建 worktree，不创建新分支
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "add", worktreePath, "origin/"+branch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("[git worktree add] failed to create worktree from remote branch %s at %s: %w, output: %s", branch, worktreePath, errors.ErrGitExec, string(out))
+	}
+	return nil
+}
+
 // CheckBranchWorktreeStatus 检查分支是否已被 worktree 使用
 func (g *GitProxy) CheckBranchWorktreeStatus(ctx context.Context, repoPath, branch string) (bool, error) {
 	worktrees, err := g.ListWorktrees(ctx, repoPath)

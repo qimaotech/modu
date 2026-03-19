@@ -205,7 +205,7 @@ func TestApp_selectedFeatureEnv_NoMain(t *testing.T) {
 
 // TestNewModuleSelector_EmptyModules 空模块列表
 func TestNewModuleSelector_EmptyModules(t *testing.T) {
-	sel := NewModuleSelector(nil, nil)
+	sel := NewModuleSelector(nil, nil, nil)
 	if sel == nil || len(sel.modules) != 0 {
 		t.Error("NewModuleSelector(nil, nil) 应返回空模块列表")
 	}
@@ -219,7 +219,7 @@ func TestNewModuleSelector_PreSelectExisting(t *testing.T) {
 		{Name: "m3", URL: "u3"},
 	}
 	existing := []string{"m2"}
-	sel := NewModuleSelector(modules, existing)
+	sel := NewModuleSelector(modules, existing, nil)
 	if len(sel.selected) != 3 {
 		t.Fatalf("selected 长度应为 3, got %d", len(sel.selected))
 	}
@@ -234,7 +234,7 @@ func TestNewModuleSelector_PreSelectExisting(t *testing.T) {
 // TestModuleSelector_SelectedModules_None 未选中任何模块时返回空切片
 func TestModuleSelector_SelectedModules_None(t *testing.T) {
 	modules := []config.Module{{Name: "m1"}, {Name: "m2"}}
-	sel := NewModuleSelector(modules, nil) // existing 为空，全部未选
+	sel := NewModuleSelector(modules, nil, nil) // existing 为空，全部未选
 	got := sel.SelectedModules()
 	if len(got) != 0 {
 		t.Errorf("SelectedModules() 应为空, got %v", got)
@@ -244,7 +244,7 @@ func TestModuleSelector_SelectedModules_None(t *testing.T) {
 // TestModuleSelector_SelectedModules_All 全部选中时返回全部模块
 func TestModuleSelector_SelectedModules_All(t *testing.T) {
 	modules := []config.Module{{Name: "a"}, {Name: "b"}}
-	sel := NewModuleSelector(modules, []string{"a", "b"})
+	sel := NewModuleSelector(modules, []string{"a", "b"}, nil)
 	got := sel.SelectedModules()
 	if len(got) != 2 {
 		t.Fatalf("SelectedModules() 长度应为 2, got %d", len(got))
@@ -257,7 +257,7 @@ func TestModuleSelector_SelectedModules_All(t *testing.T) {
 // TestModuleSelector_Update_Quit 按 q 退出
 func TestModuleSelector_Update_Quit(t *testing.T) {
 	modules := []config.Module{{Name: "m1"}}
-	sel := NewModuleSelector(modules, nil)
+	sel := NewModuleSelector(modules, nil, nil)
 	_, cmd := sel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	if cmd == nil {
 		t.Error("按 q 应返回 Quit 命令")
@@ -269,7 +269,7 @@ func TestModuleSelector_Update_Quit(t *testing.T) {
 
 // TestModuleSelector_Update_Enter 回车确认退出
 func TestModuleSelector_Update_Enter(t *testing.T) {
-	sel := NewModuleSelector([]config.Module{{Name: "m1"}}, nil)
+	sel := NewModuleSelector([]config.Module{{Name: "m1"}}, nil, nil)
 	_, cmd := sel.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
 		t.Error("回车应返回 Quit 命令")
@@ -279,7 +279,7 @@ func TestModuleSelector_Update_Enter(t *testing.T) {
 // TestModuleSelector_Update_Space 空格切换选中状态
 func TestModuleSelector_Update_Space(t *testing.T) {
 	modules := []config.Module{{Name: "m1"}, {Name: "m2"}}
-	sel := NewModuleSelector(modules, nil)
+	sel := NewModuleSelector(modules, nil, nil)
 	if sel.selected[0] {
 		t.Fatal("初始 m1 应未选中")
 	}
@@ -295,7 +295,7 @@ func TestModuleSelector_Update_Space(t *testing.T) {
 
 // TestModuleSelector_View_NonEmpty 有模块时 View 包含模块名
 func TestModuleSelector_View_NonEmpty(t *testing.T) {
-	sel := NewModuleSelector([]config.Module{{Name: "mod-a"}}, nil)
+	sel := NewModuleSelector([]config.Module{{Name: "mod-a"}}, nil, nil)
 	view := sel.View()
 	if view == "" || len(view) < 4 {
 		t.Error("View() 应返回非空字符串")

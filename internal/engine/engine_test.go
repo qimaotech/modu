@@ -19,6 +19,7 @@ type MockGitClient struct {
 	CloneFunc                            func(ctx context.Context, url, path string) error
 	CreateWorktreeFunc                   func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error
 	CreateWorktreeFromExistingBranchFunc func(ctx context.Context, repoPath, branch, worktreePath string) error
+	CreateWorktreeFromRemoteBranchFunc   func(ctx context.Context, repoPath, branch, worktreePath string) error
 	GetStatusFunc                        func(ctx context.Context, path string) (gitproxy.Status, error)
 	RemoveWorktreeFunc                   func(ctx context.Context, path string) error
 	RemoveWorktreeAndBranchFunc          func(ctx context.Context, repoPath, branch, worktreePath string) error
@@ -28,6 +29,7 @@ type MockGitClient struct {
 	FetchAndSwitchBranchFunc             func(ctx context.Context, repoPath, branch string) error
 	BranchExistsFunc                     func(ctx context.Context, repoPath, branch string) bool
 	CheckBranchWorktreeStatusFunc        func(ctx context.Context, repoPath, branch string) (bool, error)
+	RemoteBranchExistsFunc               func(ctx context.Context, repoURL, branch string) bool
 }
 
 var _ gitproxy.GitClient = (*MockGitClient)(nil)
@@ -109,9 +111,23 @@ func (m *MockGitClient) CheckBranchWorktreeStatus(ctx context.Context, repoPath,
 	return false, nil
 }
 
+func (m *MockGitClient) RemoteBranchExists(ctx context.Context, repoURL, branch string) bool {
+	if m.RemoteBranchExistsFunc != nil {
+		return m.RemoteBranchExistsFunc(ctx, repoURL, branch)
+	}
+	return false
+}
+
 func (m *MockGitClient) CreateWorktreeFromExistingBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
 	if m.CreateWorktreeFromExistingBranchFunc != nil {
 		return m.CreateWorktreeFromExistingBranchFunc(ctx, repoPath, branch, worktreePath)
+	}
+	return nil
+}
+
+func (m *MockGitClient) CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
+	if m.CreateWorktreeFromRemoteBranchFunc != nil {
+		return m.CreateWorktreeFromRemoteBranchFunc(ctx, repoPath, branch, worktreePath)
 	}
 	return nil
 }
@@ -747,5 +763,128 @@ func TestCreateVSCodeWorkspace_SkipNonModuleDirs(t *testing.T) {
 	}
 	if ws.Folder[0].Path != "module1" {
 		t.Errorf("expected folder[0] to be 'module1', got %s", ws.Folder[0].Path)
+	}
+}
+
+func TestGetModulesWithRemoteBranch_AllHaveBranch(t *testing.T) {
+	cfg := &config.Config{
+		Workspace:    "/tmp/test-workspace",
+		WorktreeRoot: "/tmp/test-worktrees",
+		Concurrency:  2,
+		Modules: []config.Module{
+			{Name: "module1", URL: "git@github.com:test/module1.git"},
+			{Name: "module2", URL: "git@github.com:test/module2.git"},
+		},
+	}
+
+	mock := &MockGitClient{
+		RemoteBranchExistsFunc: func(ctx context.Context, repoURL, branch string) bool {
+			return true // 所有模块都有该分支
+		},
+	}
+
+	engine := NewWithClient(cfg, mock)
+	result, err := engine.GetModulesWithRemoteBranch(context.Background(), "feature/test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result) != 2 {
+		t.Errorf("expected 2 modules with branch, got %d", len(result))
+	}
+	if !result["module1"] || !result["module2"] {
+		t.Error("expected both modules to have branch")
+	}
+}
+
+func TestGetModulesWithRemoteBranch_NoneHaveBranch(t *testing.T) {
+	cfg := &config.Config{
+		Workspace:    "/tmp/test-workspace",
+		WorktreeRoot: "/tmp/test-worktrees",
+		Concurrency:  2,
+		Modules: []config.Module{
+			{Name: "module1", URL: "git@github.com:test/module1.git"},
+			{Name: "module2", URL: "git@github.com:test/module2.git"},
+		},
+	}
+
+	mock := &MockGitClient{
+		RemoteBranchExistsFunc: func(ctx context.Context, repoURL, branch string) bool {
+			return false // 所有模块都没有该分支
+		},
+	}
+
+	engine := NewWithClient(cfg, mock)
+	result, err := engine.GetModulesWithRemoteBranch(context.Background(), "feature/test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result) != 0 {
+		t.Errorf("expected 0 modules with branch, got %d", len(result))
+	}
+}
+
+func TestGetModulesWithRemoteBranch_PartialHaveBranch(t *testing.T) {
+	cfg := &config.Config{
+		Workspace:    "/tmp/test-workspace",
+		WorktreeRoot: "/tmp/test-worktrees",
+		Concurrency:  2,
+		Modules: []config.Module{
+			{Name: "module1", URL: "git@github.com:test/module1.git"},
+			{Name: "module2", URL: "git@github.com:test/module2.git"},
+		},
+	}
+
+	mock := &MockGitClient{
+		RemoteBranchExistsFunc: func(ctx context.Context, repoURL, branch string) bool {
+			if strings.Contains(repoURL, "module1") {
+				return true
+			}
+			return false
+		},
+	}
+
+	engine := NewWithClient(cfg, mock)
+	result, err := engine.GetModulesWithRemoteBranch(context.Background(), "feature/test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result) != 1 {
+		t.Errorf("expected 1 module with branch, got %d", len(result))
+	}
+	if !result["module1"] {
+		t.Error("expected module1 to have branch")
+	}
+	if result["module2"] {
+		t.Error("expected module2 to not have branch")
+	}
+}
+
+func TestGetModulesWithRemoteBranch_EmptyURL(t *testing.T) {
+	cfg := &config.Config{
+		Workspace:    "/tmp/test-workspace",
+		WorktreeRoot: "/tmp/test-worktrees",
+		Concurrency:  2,
+		Modules: []config.Module{
+			{Name: "module1", URL: ""}, // 空 URL
+		},
+	}
+
+	mock := &MockGitClient{
+		RemoteBranchExistsFunc: func(ctx context.Context, repoURL, branch string) bool {
+			return false // 空 URL 应该返回 false
+		},
+	}
+
+	engine := NewWithClient(cfg, mock)
+	result, err := engine.GetModulesWithRemoteBranch(context.Background(), "feature/test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result) != 0 {
+		t.Errorf("expected 0 modules with branch, got %d", len(result))
 	}
 }
