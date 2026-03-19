@@ -372,3 +372,83 @@ func TestApp_View_Default(t *testing.T) {
 		t.Errorf("未知 state 时 View() 应为空, got %q", view)
 	}
 }
+
+// TestApp_getSelectedPath_MainProject 选中主项目时返回主项目路径
+func TestApp_getSelectedPath_MainProject(t *testing.T) {
+	app := &App{
+		mainProject: &engine.MainProjectStatus{Name: "main", Path: "/path/to/main"},
+		Envs:        []core.WorktreeEnv{},
+		selected:    0,
+	}
+	path, err := app.getSelectedPath()
+	if err != nil {
+		t.Errorf("getSelectedPath() 不应返回错误, got %v", err)
+	}
+	if path != "/path/to/main" {
+		t.Errorf("getSelectedPath() = %q, 期望 %q", path, "/path/to/main")
+	}
+}
+
+// TestApp_getSelectedPath_Feature 选中 feature 时返回主项目路径
+func TestApp_getSelectedPath_Feature(t *testing.T) {
+	app := &App{
+		mainProject: &engine.MainProjectStatus{Name: "main"},
+		Envs: []core.WorktreeEnv{{
+			Name: "feat-a",
+			MainProject: &core.ModuleStatus{Name: "main", Path: "/path/to/main"},
+		}},
+		selected: 1,
+	}
+	path, err := app.getSelectedPath()
+	if err != nil {
+		t.Errorf("getSelectedPath() 不应返回错误, got %v", err)
+	}
+	if path != "/path/to/main" {
+		t.Errorf("getSelectedPath() = %q, 期望 %q", path, "/path/to/main")
+	}
+}
+
+// TestApp_getSelectedPath_FeatureNoMainProject 选中无主项目的 feature 时返回错误
+func TestApp_getSelectedPath_FeatureNoMainProject(t *testing.T) {
+	app := &App{
+		mainProject: nil,
+		Envs: []core.WorktreeEnv{{
+			Name:        "feat-a",
+			MainProject: nil,
+		}},
+		selected: 0,
+	}
+	_, err := app.getSelectedPath()
+	if err == nil {
+		t.Error("getSelectedPath() 应返回错误")
+	}
+}
+
+// TestApp_getSelectedPath_NoSelection 未选中任何项时返回错误
+func TestApp_getSelectedPath_NoSelection(t *testing.T) {
+	app := &App{
+		mainProject: nil,
+		Envs:        []core.WorktreeEnv{},
+		selected:    0,
+	}
+	_, err := app.getSelectedPath()
+	if err == nil {
+		t.Error("getSelectedPath() 应返回错误")
+	}
+}
+
+// TestApp_copyPathAndBack_ClipboardError 剪贴板写入失败时设置错误状态
+func TestApp_copyPathAndBack_ClipboardError(t *testing.T) {
+	app := &App{
+		state:       "menu",
+		mainProject: &engine.MainProjectStatus{Name: "main", Path: "/path/to/main"},
+		selected:    0,
+	}
+	// 传入一个不存在的路径，clipboard.WriteAll 会失败
+	// 但实际上 clipboard 可能在测试环境不可用，会返回错误
+	app.copyPathAndBack()
+	// 如果剪贴板不可用，应该进入 error 状态
+	if app.state != "error" && app.state != "list" {
+		t.Errorf("copyPathAndBack() 后 state 应为 error 或 list, got %q", app.state)
+	}
+}

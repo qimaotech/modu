@@ -2,10 +2,12 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -52,6 +54,15 @@ var (
 			Dark:  "82", // 绿色 - 深色背景
 			Light: "28", // 深绿 - 浅色背景
 		})
+)
+
+// 错误定义
+var (
+	ErrNoSelection               = errors.New("未选中任何项目")
+	ErrMainProjectNotFound       = errors.New("主项目信息不存在")
+	ErrFeatureWithoutMainProject = errors.New("该 feature 无主项目，无法复制路径")
+	ErrFeatureCannotOpen         = errors.New("该 feature 无主项目，无法打开")
+	ErrFeatureNotFound           = errors.New("未找到 feature")
 )
 
 // ListEntry 列表项统一接口（主项目或 feature）
@@ -234,7 +245,7 @@ func (m *App) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					cmd := exec.Command("code", env.MainProject.Path)
 					_ = cmd.Start()
 				} else {
-					m.err = fmt.Errorf("该 feature 无主项目，无法打开")
+					m.err = fmt.Errorf("该 feature 无主项目，无法打开: %w", ErrFeatureCannotOpen)
 					m.state = "error"
 				}
 			}
@@ -252,6 +263,21 @@ func (m *App) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.state = "loading"
 			return m, m.executeUpdateWorktree(entry.GetName())
+		}
+	case "c":
+		if entry := m.selectedListEntry(); entry != nil {
+			path, err := m.getSelectedPath()
+			if err != nil {
+				m.err = err
+				m.state = "error"
+			} else {
+				if err := clipboard.WriteAll(path); err == nil {
+					m.message = "路径已复制: " + path
+				} else {
+					m.err = fmt.Errorf("复制失败: %w", err)
+					m.state = "error"
+				}
+			}
 		}
 	case "q", "esc":
 		return m, tea.Quit
@@ -275,6 +301,42 @@ func (m *App) selectedFeatureEnv() *core.WorktreeEnv {
 		return &m.Envs[m.selected]
 	}
 	return nil
+}
+
+// getSelectedPath 获取选中项的主项目路径
+func (m *App) getSelectedPath() (string, error) {
+	entry := m.selectedListEntry()
+	if entry == nil {
+		return "", fmt.Errorf("未选中任何项目: %w", ErrNoSelection)
+	}
+	if entry.IsMainProject() {
+		if m.mainProject == nil {
+			return "", fmt.Errorf("主项目信息不存在: %w", ErrMainProjectNotFound)
+		}
+		return m.mainProject.Path, nil
+	}
+	env := m.selectedFeatureEnv()
+	if env == nil || env.MainProject == nil {
+		return "", fmt.Errorf("该 feature 无主项目，无法复制路径: %w", ErrFeatureWithoutMainProject)
+	}
+	return env.MainProject.Path, nil
+}
+
+// copyPathAndBack 复制路径并返回列表视图
+func (m *App) copyPathAndBack() {
+	path, err := m.getSelectedPath()
+	if err != nil {
+		m.err = err
+		m.state = "error"
+		return
+	}
+	if err := clipboard.WriteAll(path); err != nil {
+		m.err = fmt.Errorf("复制失败: %w", err)
+		m.state = "error"
+		return
+	}
+	m.message = "路径已复制: " + path
+	m.state = "list"
 }
 
 func (m *App) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -315,9 +377,9 @@ func (m *App) initModuleSelector() {
 }
 
 func (m *App) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	menuLen := 2
+	menuLen := 3
 	if !m.isMainProjectMenu {
-		menuLen = 4
+		menuLen = 5
 	}
 	switch msg.String() {
 	case "up", "k":
@@ -338,6 +400,8 @@ func (m *App) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.state = "list"
 				}
 			case 1:
+				m.copyPathAndBack()
+			case 2:
 				m.state = "loading"
 				return m, m.executeUpdateCode()
 			}
@@ -349,18 +413,20 @@ func (m *App) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					_ = cmd.Start()
 					m.state = "list"
 				} else {
-					m.err = fmt.Errorf("该 feature 无主项目，无法打开")
+					m.err = fmt.Errorf("该 feature 无主项目，无法打开: %w", ErrFeatureCannotOpen)
 					m.state = "error"
 				}
 			case 1:
+				m.copyPathAndBack()
+			case 2:
 				if env := m.selectedFeatureEnv(); env != nil {
 					m.state = "loading"
 					return m, m.executeUpdateWorktree(env.Name)
 				}
-			case 2:
+			case 3:
 				m.initModuleSelector()
 				m.state = "modules"
-			case 3:
+			case 4:
 				if env := m.selectedFeatureEnv(); env != nil {
 					m.state = "confirm"
 					m.feature = env.Name
@@ -389,9 +455,11 @@ func (m *App) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = cmd.Start()
 			m.state = "list"
 		} else if !m.isMainProjectMenu {
-			m.err = fmt.Errorf("该 feature 无主项目，无法打开")
+			m.err = fmt.Errorf("该 feature 无主项目，无法打开: %w", ErrFeatureCannotOpen)
 			m.state = "error"
 		}
+	case "c":
+		m.copyPathAndBack()
 	case "u":
 		if m.isMainProjectMenu {
 			m.state = "loading"
@@ -458,7 +526,7 @@ func (m *App) executeModulesChange() tea.Msg {
 		}
 	}
 	if env == nil {
-		return errorMsg{fmt.Errorf("未找到 feature: %s", m.modulesFeature)}
+		return errorMsg{fmt.Errorf("未找到 feature %s: %w", m.modulesFeature, ErrFeatureNotFound)}
 	}
 	existingModules := make(map[string]bool)
 	for _, mod := range env.Modules {
@@ -557,7 +625,7 @@ func (m *App) renderList() string {
 	var s strings.Builder
 	s.WriteString(headerStyle.Render("modu - Worktree Manager"))
 	s.WriteString("\n\n")
-	s.WriteString(itemStyle.Render("↑/↓ 选择，Enter 回车选择，m 管理模块(仅 feature 有效)，d 删除，o 打开 VS Code，q/esc 退出"))
+	s.WriteString(itemStyle.Render("↑/↓ 选择  Enter 回车  m 管理模块  u 更新代码  c 复制路径\nd 删除  o 打开 VS Code  q/esc 退出"))
 	s.WriteString("\n\n")
 
 	total := m.listEntryCount()
@@ -633,7 +701,7 @@ func (m *App) renderMenu() string {
 
 	if m.isMainProjectMenu && m.mainProject != nil {
 		s.WriteString(fmt.Sprintf("当前选中: %s [主项目] (<dirty状态>)\n\n", m.mainProject.Name))
-		menuItems := []string{"打开 VS Code (o)", "更新代码 (u)"}
+		menuItems := []string{"打开 VS Code (o)", "复制路径 (c)", "更新代码 (u)"}
 		for i, item := range menuItems {
 			if i == m.menuSelected {
 				s.WriteString(selectedItemStyle.Render(fmt.Sprintf("→ %s", item)))
@@ -646,7 +714,7 @@ func (m *App) renderMenu() string {
 		if env := m.selectedFeatureEnv(); env != nil {
 			s.WriteString(fmt.Sprintf("当前选中: %s\n\n", env.Name))
 		}
-		menuItems := []string{"打开 VS Code (o)", "更新代码 (u)", "Modules 管理 (m)", "删除 (d)"}
+		menuItems := []string{"打开 VS Code (o)", "复制路径 (c)", "更新代码 (u)", "Modules 管理 (m)", "删除 (d)"}
 		for i, item := range menuItems {
 			if i == m.menuSelected {
 				s.WriteString(selectedItemStyle.Render(fmt.Sprintf("→ %s", item)))

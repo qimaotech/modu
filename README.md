@@ -106,6 +106,7 @@ modu init --scan  # 自动扫描并添加模块
 modu create my-feature
 modu create my-feature --base main
 modu create my-feature --modules frontend,backend  # 只创建指定模块
+# 创建时会自动查询远端分支状态，预先选中已有该分支的模块
 
 # 列出所有 worktree
 modu list
@@ -147,12 +148,16 @@ modu version
 
 ### TUI 快捷键
 
-| 按键   | 说明                   |
-| ------ | ---------------------- |
-| ↑/↓    | 上下选择 feature       |
-| Enter  | 确认删除选中 feature   |
-| o      | 用 VS Code 打开主项目 |
-| q/esc  | 退出 TUI              |
+| 按键   | 说明                            |
+| ------ | ------------------------------- |
+| ↑/↓    | 上下选择 feature                 |
+| Enter  | 回车确认                        |
+| c      | 复制路径到剪贴板                 |
+| d      | 删除选中 feature                 |
+| m      | 管理模块（仅 feature 有效）      |
+| o      | 用 VS Code 打开主项目           |
+| u      | 更新代码                         |
+| q/esc  | 退出 TUI                       |
 
 # 创建配置文件
 modu config create
@@ -204,6 +209,7 @@ task build
 - Go 1.25+
 - [Cobra](https://github.com/spf13/cobra) - CLI 框架
 - [Bubble Tea](https://github.com/charmbracelet/bubbletea) - TUI 框架
+- [clipboard](https://github.com/atotto/clipboard) - 跨平台剪贴板支持
 
 ## 开源协议
 
