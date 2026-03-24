@@ -22,7 +22,7 @@ type MockGitClient struct {
 	CreateWorktreeFromRemoteBranchFunc   func(ctx context.Context, repoPath, branch, worktreePath string) error
 	GetStatusFunc                        func(ctx context.Context, path string) (gitproxy.Status, error)
 	RemoveWorktreeFunc                   func(ctx context.Context, path string) error
-	RemoveWorktreeAndBranchFunc          func(ctx context.Context, repoPath, branch, worktreePath string) error
+	RemoveWorktreeAndBranchFunc          func(ctx context.Context, repoPath, worktreePath, featureDirName string) error
 	ListWorktreesFunc                    func(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error)
 	FetchFunc                            func(ctx context.Context, repoPath string) error
 	RebaseFunc                           func(ctx context.Context, path string) error
@@ -62,9 +62,9 @@ func (m *MockGitClient) RemoveWorktree(ctx context.Context, path string) error {
 	return nil
 }
 
-func (m *MockGitClient) RemoveWorktreeAndBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
+func (m *MockGitClient) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktreePath, featureDirName string) error {
 	if m.RemoveWorktreeAndBranchFunc != nil {
-		return m.RemoveWorktreeAndBranchFunc(ctx, repoPath, branch, worktreePath)
+		return m.RemoveWorktreeAndBranchFunc(ctx, repoPath, worktreePath, featureDirName)
 	}
 	return nil
 }

@@ -64,6 +64,11 @@ func featureToDirName(feature string) string {
 	return strings.ReplaceAll(feature, "/", "-")
 }
 
+// FeatureToDirName 将 feature 名转为 worktree 根下目录名（与内部分支/目录规则一致），供 CLI 等调用。
+func FeatureToDirName(feature string) string {
+	return featureToDirName(feature)
+}
+
 // Init 并发克隆所有配置的仓库
 func (e *Engine) Init(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
@@ -238,12 +243,12 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 		// 回滚：删除已创建的模块 worktree
 		for _, r := range resultSlice {
 			if r.err == nil && r.path != "" && r.repoPath != "" {
-				_ = e.GitProxy.RemoveWorktreeAndBranch(ctx, r.repoPath, feature, r.path)
+				_ = e.GitProxy.RemoveWorktreeAndBranch(ctx, r.repoPath, r.path, dirName)
 				_ = os.RemoveAll(r.path)
 			}
 		}
 		// 删除主项目 worktree（feature 目录）
-		_ = e.GitProxy.RemoveWorktreeAndBranch(ctx, e.Config.Workspace, feature, mainProjectPath)
+		_ = e.GitProxy.RemoveWorktreeAndBranch(ctx, e.Config.Workspace, mainProjectPath, dirName)
 		_ = os.RemoveAll(mainProjectPath)
 
 		if len(errMsgs) > 0 {
@@ -479,8 +484,8 @@ func (e *Engine) DeleteWorktree(ctx context.Context, feature string, force bool)
 			continue
 		}
 
-		logger.Info("删除模块 worktree: module=%s, repo=%s, branch=%s, path=%s", moduleName, repoPath, feature, modulePath)
-		if err := e.GitProxy.RemoveWorktreeAndBranch(ctx, repoPath, feature, modulePath); err != nil {
+		logger.Info("删除模块 worktree: module=%s, repo=%s, featureDir=%s, path=%s", moduleName, repoPath, dirName, modulePath)
+		if err := e.GitProxy.RemoveWorktreeAndBranch(ctx, repoPath, modulePath, dirName); err != nil {
 			logger.Error("删除模块 worktree 失败: module=%s, error=%v", moduleName, err)
 			continue
 		}
@@ -494,8 +499,8 @@ func (e *Engine) DeleteWorktree(ctx context.Context, feature string, force bool)
 	if _, err := os.Stat(e.Config.Workspace); os.IsNotExist(err) {
 		logger.Warn("主项目仓库不存在，跳过: repo=%s", e.Config.Workspace)
 	} else {
-		logger.Info("删除主项目 worktree: repo=%s, branch=%s, path=%s", e.Config.Workspace, feature, mainProjectPath)
-		if err := e.GitProxy.RemoveWorktreeAndBranch(ctx, e.Config.Workspace, feature, mainProjectPath); err != nil {
+		logger.Info("删除主项目 worktree: repo=%s, featureDir=%s, path=%s", e.Config.Workspace, dirName, mainProjectPath)
+		if err := e.GitProxy.RemoveWorktreeAndBranch(ctx, e.Config.Workspace, mainProjectPath, dirName); err != nil {
 			logger.Error("删除主项目 worktree 失败: error=%v", err)
 			fmt.Printf("Warning: failed to remove main project worktree: %v\n", err)
 		} else {
@@ -1017,7 +1022,7 @@ func (e *Engine) RemoveModule(ctx context.Context, feature, moduleName string) e
 		return nil
 	}
 
-	if err := e.GitProxy.RemoveWorktreeAndBranch(ctx, repoPath, feature, modulePath); err != nil {
+	if err := e.GitProxy.RemoveWorktreeAndBranch(ctx, repoPath, modulePath, dirName); err != nil {
 		return fmt.Errorf("failed to remove worktree for %s: %w", moduleName, err)
 	}
 

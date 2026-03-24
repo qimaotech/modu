@@ -93,9 +93,32 @@ func (g *GitProxy) RemoveWorktree(ctx context.Context, path string) error {
 	return nil
 }
 
-// RemoveWorktreeAndBranch 删除 worktree 并删除对应的分支
-func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
-	logger.Debug("RemoveWorktreeAndBranch: repo=%s, branch=%s, path=%s", repoPath, branch, worktreePath)
+// branchToFeatureDirSlug 与 engine.featureToDirName 一致：分支名 -> feature 目录 slug
+func branchToFeatureDirSlug(branch string) string {
+	return strings.ReplaceAll(branch, "/", "-")
+}
+
+// RemoveWorktreeAndBranch 删除 worktree；仅当当前检出分支的 slug 与 featureDirName 一致时才删除该分支
+func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktreePath, featureDirName string) error {
+	logger.Debug("RemoveWorktreeAndBranch: repo=%s, featureDirName=%s, path=%s", repoPath, featureDirName, worktreePath)
+
+	status, err := g.GetStatus(ctx, worktreePath)
+	branchToDelete := ""
+	if err != nil {
+		logger.Warn("无法读取 worktree 分支状态，跳过删除分支: path=%s, err=%v", worktreePath, err)
+		fmt.Printf("Warning: skip branch delete (cannot read status): %s\n", worktreePath)
+	} else {
+		b := strings.TrimSpace(status.Branch)
+		if b == "" || b == "HEAD" {
+			logger.Warn("worktree 无有效分支名（detached HEAD 等），跳过删除分支: path=%s", worktreePath)
+			fmt.Printf("Warning: skip branch delete (detached or unknown HEAD): %s\n", worktreePath)
+		} else if branchToFeatureDirSlug(b) != featureDirName {
+			logger.Warn("当前分支 %s（slug=%s）与 feature 目录名 %s 不一致，跳过删除分支", b, branchToFeatureDirSlug(b), featureDirName)
+			fmt.Printf("Warning: skip branch delete: branch %q slug does not match feature dir %q\n", b, featureDirName)
+		} else {
+			branchToDelete = b
+		}
+	}
 
 	// 先用 git worktree remove 移除
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "remove", "--force", worktreePath)
@@ -118,16 +141,17 @@ func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, branch
 		logger.Info("git worktree prune 成功")
 	}
 
-	// 再删除对应的分支
-	logger.Info("删除分支: repo=%s, branch=%s", repoPath, branch)
-	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "branch", "-D", branch)
-	out, err = cmd.CombinedOutput()
-	if err != nil {
-		// 分支可能不存在，忽略错误
-		logger.Warn("删除分支失败（可能不存在）: branch=%s, error=%s", branch, string(out))
-		fmt.Printf("Warning: failed to delete branch %s: %s\n", branch, string(out))
-	} else {
-		logger.Info("删除分支成功: %s", branch)
+	// 再删除对应的分支（仅在与目录 slug 一致时）
+	if branchToDelete != "" {
+		logger.Info("删除分支: repo=%s, branch=%s", repoPath, branchToDelete)
+		cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "branch", "-D", branchToDelete)
+		out, err = cmd.CombinedOutput()
+		if err != nil {
+			logger.Warn("删除分支失败（可能不存在）: branch=%s, error=%s", branchToDelete, string(out))
+			fmt.Printf("Warning: failed to delete branch %s: %s\n", branchToDelete, string(out))
+		} else {
+			logger.Info("删除分支成功: %s", branchToDelete)
+		}
 	}
 
 	return nil

@@ -17,13 +17,13 @@
 
 1. **Pre-check**：若 `worktree-root/<feature>` 已存在，可支持“继续添加模块”或报错（由 CLI 层选择）；主项目 worktree 位于 feature 目录根，子模块位于 `feature/<module.Name>`。
 2. **Execution**：主项目先创建 worktree，再 errgroup 并发为各模块执行 `git fetch` + `git worktree add`；已存在的模块目录跳过。
-3. **Rollback**：若任一模块失败，收集已成功创建的路径，依次 `RemoveWorktreeAndBranch` + `os.RemoveAll`，再删除主项目 worktree 与 feature 目录，返回 `ERR_PARTIAL_FAILURE` 或等价错误。
+3. **Rollback**：若任一模块失败，收集已成功创建的路径，依次 `RemoveWorktreeAndBranch(ctx, repoPath, path, dirName)` + `os.RemoveAll`，再删除主项目 worktree 与 feature 目录；其中 `dirName` 为 `featureToDirName(feature)`，返回 `ERR_PARTIAL_FAILURE` 或等价错误。
 
 ## DeleteWorktree
 
 1. 若 feature 目录不存在，返回 `ERR_FEATURE_NOT_FOUND`。
 2. 若未使用 `--force` 且 `Config.StrictDirty` 为 true：构建 `WorktreeEnv` 时仅包含 **配置内模块** 子目录，调用 **CheckDirty**；若有 dirty 模块，返回 `ERR_DIRTY_WORKTREE`。
-3. 仅对 **配置内模块** 依次执行 `RemoveWorktreeAndBranch`，再删除主项目 worktree，最后 `os.RemoveAll(featurePath)`。不对非配置目录单独调用 RemoveWorktreeAndBranch。
+3. 仅对 **配置内模块** 依次执行 `RemoveWorktreeAndBranch(ctx, repoPath, modulePath, dirName)`，再对主项目执行 `RemoveWorktreeAndBranch(ctx, workspace, mainProjectPath, dirName)`，最后 `os.RemoveAll(featurePath)`。`dirName` 为 `featureToDirName(feature)`，供 gitproxy 校验「当前分支 slug」与目录名一致后再删分支。不对非配置目录单独调用 RemoveWorktreeAndBranch。
 
 ## CheckDirty
 

@@ -366,7 +366,7 @@ func runCreate(cmd *cobra.Command, args []string) {
 			modulePath := filepath.Join(featurePath, name)
 			repoPath := filepath.Join(eng.Config.Workspace, name)
 			// 删除 worktree 和分支
-			if err := eng.GitProxy.RemoveWorktreeAndBranch(cmd.Context(), repoPath, feature, modulePath); err != nil {
+			if err := eng.GitProxy.RemoveWorktreeAndBranch(cmd.Context(), repoPath, modulePath, engine.FeatureToDirName(feature)); err != nil {
 				fmt.Printf("  - %s: 删除失败 %v\n", name, err)
 			} else {
 				fmt.Printf("  - %s: 已删除（含分支）\n", name)
