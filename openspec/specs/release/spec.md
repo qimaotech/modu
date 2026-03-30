@@ -1,6 +1,6 @@
 # modu 分发与升级规范
 
-**版本**: 2.5 | **来源**: openspec/changes/archive/2025-03-10-goreleaser-version-homebrew
+**版本**: 2.4 | **来源**: openspec/changes/archive/2025-03-10-goreleaser-version-homebrew
 
 ## 目的
 

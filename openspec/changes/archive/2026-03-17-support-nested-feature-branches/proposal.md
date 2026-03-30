@@ -6,7 +6,7 @@
 
 - **目录名转换**：在文件系统中使用 `-` 替代 `/`（如 `feature/abc` → 目录名 `feature-abc`）
 - **显示**：直接显示目录名（如 `feature-abc`）
-- **新增转换函数**：`featureToDirName()`（仅单向转换）
+- **新增转换函数**：需要实现双向转换 `featureToDirName()` 和 `dirNameToFeature()`（支持 `/` ↔ `-` 互转）
 - **兼容现有结构**：现有的扁平 features（如 `feature-abc`）仍然正常工作
 
 ## Capabilities

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+当 `modu create` 创建 feature worktree 或用户在 TUI 中增删模块时，自动生成和更新 VS Code workspace 文件（`<feature>.code-workspace`），包含所有实际存在的模块目录和标准 Go 开发配置，提升开发者体验。
 
 ## ADDED Requirements
 

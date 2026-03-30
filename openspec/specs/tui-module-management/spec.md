@@ -1,7 +1,8 @@
 # tui-module-management Specification
 
 ## Purpose
-TBD - created by archiving change add-tui-modules-management. Update Purpose after archive.
+
+在 TUI 列表视图中提供模块管理功能，允许用户通过键盘快捷键（m 键）或操作菜单快速进入模块管理视图，支持查看、新增和删除 feature 下的模块 worktree。
 ## Requirements
 ### Requirement: 列表视图按 m 进入模块管理
 用户 MUST 可以在列表视图按 `m` 键直接进入模块管理视图。

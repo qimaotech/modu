@@ -13,6 +13,7 @@
 - **GetStatus(ctx, path)**：在 path 执行 `git status --porcelain`，解析为 Status（IsDirty、Branch）；目录不存在返回 `ERR_MODULE_NOT_FOUND`。
 - **RemoveWorktree(ctx, path)**：`git worktree remove <path>`；若 remove 失败可回退为 `os.RemoveAll(path)`（实现可选）。
 - **RemoveWorktreeAndBranch(ctx, repoPath, worktreePath, featureDirName)**：在移除 worktree **之前**对 `worktreePath` 调用 `GetStatus` 取得当前检出分支；仅当将该分支名中的 `/` 全部替换为 `-` 后的字符串与 `featureDirName`（与 `worktree-root` 下该 feature 的目录 basename 一致）相同时，才在 `repoPath` 上对该分支执行 `git branch -D`。若无法读状态、detached HEAD（`HEAD`）、或不一致，则仍执行 worktree remove / prune，但**不删除分支**（防误删）。`featureDirName` 规则与引擎侧「分支名 → 目录名」转换一致（`/ → -`）。
+- **FetchAndSwitchBranch(ctx, repoPath, branch)**：在 repoPath 仓库中先执行 `git fetch origin` 拉取最新，再执行 `git checkout <branch>` 切换到指定分支；若分支不存在返回错误；若切换失败返回带 `ERR_GIT_EXEC` 的上下文错误。
 
 ## Status 解析
 

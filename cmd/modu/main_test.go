@@ -214,3 +214,99 @@ func splitModuleString(s string) []string {
 	}
 	return []string{s}
 }
+
+func TestInferCurrentFeature(t *testing.T) {
+	t.Run("feature根目录推断", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		worktreeRoot := filepath.Join(tmpDir, "worktrees")
+		featurePath := filepath.Join(worktreeRoot, "feature1")
+		os.MkdirAll(featurePath, 0755)
+
+		result := inferCurrentFeature(featurePath, worktreeRoot)
+		if result != "feature1" {
+			t.Errorf("expected 'feature1', got '%s'", result)
+		}
+	})
+
+	t.Run("feature子目录推断", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		worktreeRoot := filepath.Join(tmpDir, "worktrees")
+		featurePath := filepath.Join(worktreeRoot, "feature1", "module1", "src")
+		os.MkdirAll(featurePath, 0755)
+
+		result := inferCurrentFeature(featurePath, worktreeRoot)
+		if result != "feature1" {
+			t.Errorf("expected 'feature1', got '%s'", result)
+		}
+	})
+
+	t.Run("worktreeRoot本身返回空", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		worktreeRoot := filepath.Join(tmpDir, "worktrees")
+		os.MkdirAll(worktreeRoot, 0755)
+
+		result := inferCurrentFeature(worktreeRoot, worktreeRoot)
+		if result != "" {
+			t.Errorf("expected empty string, got '%s'", result)
+		}
+	})
+
+	t.Run("worktreeRoot外返回空", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		worktreeRoot := filepath.Join(tmpDir, "worktrees")
+		os.MkdirAll(worktreeRoot, 0755)
+		outsidePath := tmpDir
+
+		result := inferCurrentFeature(outsidePath, worktreeRoot)
+		if result != "" {
+			t.Errorf("expected empty string, got '%s'", result)
+		}
+	})
+
+	t.Run("包含symlink的路径", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		worktreeRoot := filepath.Join(tmpDir, "worktrees")
+		featurePath := filepath.Join(worktreeRoot, "feature1")
+		os.MkdirAll(featurePath, 0755)
+
+		// 创建指向 featurePath 的 symlink
+		symlinkPath := filepath.Join(tmpDir, "symlink")
+		os.Symlink(featurePath, symlinkPath)
+
+		// 通过 symlink 访问子目录
+		subDirViaSymlink := filepath.Join(symlinkPath, "module1")
+		os.MkdirAll(subDirViaSymlink, 0755)
+
+		result := inferCurrentFeature(subDirViaSymlink, worktreeRoot)
+		if result != "feature1" {
+			t.Errorf("expected 'feature1', got '%s'", result)
+		}
+	})
+
+	t.Run("symlink指向worktreeRoot外", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		worktreeRoot := filepath.Join(tmpDir, "worktrees")
+		os.MkdirAll(worktreeRoot, 0755)
+
+		// 创建指向 tmpDir（worktreeRoot 外）的 symlink
+		symlinkPath := filepath.Join(worktreeRoot, "link-to-outside")
+		os.Symlink(tmpDir, symlinkPath)
+
+		result := inferCurrentFeature(symlinkPath, worktreeRoot)
+		if result != "" {
+			t.Errorf("expected empty string, got '%s'", result)
+		}
+	})
+
+	t.Run("多层级嵌套feature目录", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		worktreeRoot := filepath.Join(tmpDir, "worktrees")
+		featurePath := filepath.Join(worktreeRoot, "feature1", "nested", "deep", "path")
+		os.MkdirAll(featurePath, 0755)
+
+		result := inferCurrentFeature(featurePath, worktreeRoot)
+		if result != "feature1" {
+			t.Errorf("expected 'feature1', got '%s'", result)
+		}
+	})
+}

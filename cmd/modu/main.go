@@ -111,9 +111,9 @@ func main() {
 
 	// info 命令
 	infoCmd := &cobra.Command{
-		Use:   "info <feature>",
-		Short: "查看 feature 详情",
-		Args:  cobra.ExactArgs(1),
+		Use:   "info [feature]",
+		Short: "查看 feature 详情（无参数时自动推断当前所属 feature）",
+		Args:  cobra.MaximumNArgs(1),
 		Run:   runInfo,
 	}
 
@@ -431,10 +431,32 @@ func runList(cmd *cobra.Command, args []string) {
 }
 
 func runInfo(cmd *cobra.Command, args []string) {
-	feature := args[0]
-
 	eng := loadConfig()
 	formatter := output.New(outputFmt)
+
+	var feature string
+	if len(args) == 0 {
+		// 无参数：从当前目录向上回溯推断 feature
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "获取当前目录失败")
+			os.Exit(1)
+		}
+		feature = inferCurrentFeature(cwd, eng.Config.WorktreeRoot)
+		if feature == "" {
+			// 区分两种边界情况
+			cwdAbs, _ := filepath.EvalSymlinks(cwd)
+			worktreeRootAbs, _ := filepath.EvalSymlinks(eng.Config.WorktreeRoot)
+			if cwdAbs == worktreeRootAbs {
+				fmt.Fprintln(os.Stderr, "错误：请指定 feature 参数（当前目录为 worktreeRoot）")
+			} else {
+				fmt.Fprintln(os.Stderr, "错误：当前目录不在任何 feature 下（请指定 feature 参数或在工作目录内执行）")
+			}
+			os.Exit(1)
+		}
+	} else {
+		feature = args[0]
+	}
 
 	env, err := eng.GetWorktreeInfo(cmd.Context(), feature)
 	if err != nil {
@@ -443,6 +465,27 @@ func runInfo(cmd *cobra.Command, args []string) {
 	}
 
 	fmt.Print(formatter.FormatInfoResponse(env))
+}
+
+// inferCurrentFeature 从当前目录向上回溯，找到 worktreeRoot 的直接子目录（feature 目录）
+func inferCurrentFeature(cwd, worktreeRoot string) string {
+	// 规范化路径，兼容 symlink
+	worktreeRootAbs, _ := filepath.EvalSymlinks(worktreeRoot)
+	cwdAbs, _ := filepath.EvalSymlinks(cwd)
+
+	for {
+		parent := filepath.Dir(cwdAbs)
+		if parent == worktreeRootAbs {
+			// 找到 worktreeRoot，返回当前目录名（即 feature 目录名）
+			return filepath.Base(cwdAbs)
+		}
+		// 防止无限循环
+		if parent == "/" || parent == "." || parent == cwdAbs {
+			break
+		}
+		cwdAbs = parent
+	}
+	return "" // 未找到
 }
 
 func runInit(cmd *cobra.Command, args []string) {

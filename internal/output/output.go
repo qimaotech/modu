@@ -242,19 +242,25 @@ func (f *Formatter) FormatInfoResponse(env *core.WorktreeEnv) string {
 		return string(data)
 	}
 
-	// 文本格式
+	// 文本格式（带 emoji 美化）
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Feature: %s\n", env.Name))
-	sb.WriteString("Modules:\n")
-	for _, mod := range env.Modules {
-		status := "clean"
+	sb.WriteString(fmt.Sprintf("🔖 Feature: %s\n", env.Name))
+	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	sb.WriteString("📦 Modules:\n")
+	for i, mod := range env.Modules {
+		status := "✅ clean"
 		if mod.IsDirty {
-			status = "dirty"
+			status = "🔴 dirty"
 		}
-		sb.WriteString(fmt.Sprintf("  - %s\n", mod.Name))
-		sb.WriteString(fmt.Sprintf("    Branch: %s\n", mod.Branch))
-		sb.WriteString(fmt.Sprintf("    Status: %s\n", status))
-		sb.WriteString(fmt.Sprintf("    Path: %s\n", mod.Path))
+		prefix := "├─"
+		indent := "│   "
+		if i == len(env.Modules)-1 {
+			prefix = "└─"
+			indent = "    "
+		}
+		sb.WriteString(fmt.Sprintf("  %s %s\n", prefix, mod.Name))
+		sb.WriteString(fmt.Sprintf("  %s🌿 Branch: %s  %s\n", indent, mod.Branch, status))
+		sb.WriteString(fmt.Sprintf("  %s📁 Path: %s\n", indent, mod.Path))
 	}
 
 	return sb.String()
