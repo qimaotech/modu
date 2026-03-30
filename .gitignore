@@ -27,3 +27,5 @@ docs/temp/
 # Go
 *.test
 dist/
+
+.pi
