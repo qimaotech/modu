@@ -15,13 +15,14 @@ import (
 
 // Config modu 配置文件结构
 type Config struct {
-	Workspace    string   `yaml:"workspace"`          // 裸仓库/主仓库所在目录
-	WorktreeRoot string   `yaml:"worktree-root"`      // 特性分支代码存放目录
-	DefaultBase  string   `yaml:"default-base"`       // 默认基准分支 (如 develop)
-	Concurrency  int      `yaml:"concurrency"`        // 并发数，默认 5
-	AutoFetch    bool     `yaml:"auto-fetch"`         // 操作前自动 fetch
-	StrictDirty  bool     `yaml:"strict-dirty-check"` // 删除前强制脏检查
-	Modules      []Module `yaml:"modules"`            // 模块列表
+	Workspace             string   `yaml:"workspace"`                // 裸仓库/主仓库所在目录
+	WorktreeRoot          string   `yaml:"worktree-root"`             // 特性分支代码存放目录
+	DefaultBase           string   `yaml:"default-base"`             // 默认基准分支 (如 develop)
+	Concurrency           int      `yaml:"concurrency"`              // 并发数，默认 5
+	AutoFetch             bool     `yaml:"auto-fetch"`               // 操作前自动 fetch
+	StrictDirty           bool     `yaml:"strict-dirty-check"`       // 删除前强制脏检查
+	Modules               []Module `yaml:"modules"`                  // 模块列表
+	DefaultSelectedModules []string `yaml:"default-selected-modules"` // 创建时默认选中的模块列表
 }
 
 // IsConfigNotFoundError 检查是否为配置文件不存在错误

@@ -99,6 +99,13 @@ func main() {
 	}
 	deleteCmd.Flags().BoolP("force", "f", false, "强制删除（跳过脏检查）")
 
+	// default-select 命令 - 设置默认选中的模块
+	defaultSelectCmd := &cobra.Command{
+		Use:   "default-select",
+		Short: "设置创建 feature 时默认选中的模块",
+		Run:   runDefaultSelect,
+	}
+
 	// list 命令
 	listCmd := &cobra.Command{
 		Use:   "list",
@@ -205,7 +212,7 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(createCmd, deleteCmd, listCmd, infoCmd, configCmd, initCmd, statusCmd, updateCmd, tuiCmd, versionCmd)
+	rootCmd.AddCommand(createCmd, deleteCmd, defaultSelectCmd, listCmd, infoCmd, configCmd, initCmd, statusCmd, updateCmd, tuiCmd, versionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -297,7 +304,7 @@ func runCreate(cmd *cobra.Command, args []string) {
 				remoteHasBranch = make(map[string]bool)
 			}
 
-			selectedModules, isQuit, err := ui.SelectModules(eng.Config.Modules, existingModules, remoteHasBranch)
+			selectedModules, isQuit, err := ui.SelectModules(eng.Config.Modules, existingModules, remoteHasBranch, eng.Config.DefaultSelectedModules, "")
 			if err != nil {
 				// TUI 不可用时回退到非交互模式
 				fmt.Fprintf(os.Stderr, "TUI 不可用: %v\n", err)
@@ -677,6 +684,50 @@ func printUpdateResult(feature string, success int, failed map[string]error) {
 		names = append(names, name)
 	}
 	fmt.Printf("更新成功: %d 个，失败: %d 个 (%s)\n", success, len(failed), strings.Join(names, ", "))
+}
+
+// runDefaultSelect 设置默认选中的模块
+func runDefaultSelect(cmd *cobra.Command, args []string) {
+	eng := loadConfig()
+
+	// 如果没有模块，提示用户先配置
+	if len(eng.Config.Modules) == 0 {
+		fmt.Println("当前没有配置任何模块，请先运行 modu config scan 添加模块")
+		os.Exit(1)
+	}
+
+	// 使用已配置的默认选中模块作为预选
+	selectedModules, isQuit, err := ui.SelectModules(eng.Config.Modules, nil, nil, eng.Config.DefaultSelectedModules, "选择默认模块")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "TUI 不可用: %v\n", err)
+		os.Exit(1)
+	}
+	if isQuit {
+		fmt.Println("已取消操作")
+		return
+	}
+
+	// 收集选中的模块名称
+	var selectedNames []string
+	for _, m := range selectedModules {
+		selectedNames = append(selectedNames, m.Name)
+	}
+
+	// 更新配置
+	eng.Config.DefaultSelectedModules = selectedNames
+
+	// 保存配置
+	if err := config.SaveConfig(eng.Config, configPath); err != nil {
+		fmt.Fprintf(os.Stderr, "保存配置失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("\x1b[32m✓\x1b[0m 默认选中模块已更新")
+	if len(selectedNames) == 0 {
+		fmt.Println("  (未选择任何模块，创建时将默认全选)")
+	} else {
+		fmt.Printf("  默认选中: %s\n", strings.Join(selectedNames, ", "))
+	}
 }
 
 // runConfigCreate 运行配置创建命令

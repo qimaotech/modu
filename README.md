@@ -4,18 +4,19 @@
 
 ## 功能特性
 
-| 命令     | 说明                             |
-| -------- | -------------------------------- |
-| `create` | 创建 feature 工作树              |
-| `delete` | 删除 feature 工作树              |
-| `list`   | 列出所有 feature 工作树          |
-| `info`   | 查看 feature 详情                |
-| `init`   | 初始化仓库（克隆所有配置的仓库） |
-| `status` | 显示所有模块的脏状态             |
-| `update` | 更新代码（主项目切换到 default-base 分支） |
-| `config` | 配置管理（创建/扫描）           |
-| `tui`    | 启动交互式 TUI 界面              |
-| `version`| 显示版本信息                     |
+| 命令            | 说明                                       |
+| --------------- | ------------------------------------------ |
+| `create`        | 创建 feature 工作树                        |
+| `delete`        | 删除 feature 工作树                        |
+| `default-select` | 设置创建 feature 时默认选中的模块          |
+| `list`          | 列出所有 feature 工作树                    |
+| `info`          | 查看 feature 详情                          |
+| `init`          | 初始化仓库（克隆所有配置的仓库）           |
+| `status`        | 显示所有模块的脏状态                       |
+| `update`        | 更新代码（主项目切换到 default-base 分支） |
+| `config`        | 配置管理（创建/扫描）                      |
+| `tui`           | 启动交互式 TUI 界面                        |
+| `version`       | 显示版本信息                               |
 
 ## 安装
 
@@ -47,15 +48,16 @@ modules:
 
 **配置项说明：**
 
-| 字段                 | 必填 | 说明                      |
-| -------------------- | ---- | ------------------------- |
-| `workspace`          | 是   | 裸仓库/主仓库所在目录     |
-| `worktree-root`      | 是   | 特性分支代码存放目录      |
-| `default-base`       | 是   | 默认基准分支 (如 develop)，`modu update` 主项目时会切换到此分支 |
-| `concurrency`        | 否   | 并发数，默认 5            |
-| `auto-fetch`         | 否   | 操作前自动 fetch          |
-| `strict-dirty-check` | 否   | 删除前强制脏检查          |
-| `modules`            | 是   | 模块列表                  |
+| 字段                     | 必填 | 说明                      |
+| ------------------------ | ---- | ------------------------- |
+| `workspace`              | 是   | 裸仓库/主仓库所在目录     |
+| `worktree-root`          | 是   | 特性分支代码存放目录      |
+| `default-base`           | 是   | 默认基准分支 (如 develop)，`modu update` 主项目时会切换到此分支 |
+| `concurrency`            | 否   | 并发数，默认 5            |
+| `auto-fetch`             | 否   | 操作前自动 fetch          |
+| `strict-dirty-check`     | 否   | 删除前强制脏检查          |
+| `default-selected-modules` | 否   | 创建 feature 时默认选中的模块列表（可通过 `modu default-select` 命令配置） |
+| `modules`               | 是   | 模块列表                  |
 
 **模块配置：**
 
@@ -119,6 +121,9 @@ modu info my-feature
 # 删除 worktree
 modu delete my-feature
 modu delete my-feature --force  # 强制删除（跳过脏检查）
+
+# 设置默认选中的模块（创建 feature 时会默认选中这些模块）
+modu default-select
 
 # 查看脏状态
 modu status
