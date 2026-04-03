@@ -254,6 +254,13 @@ func loadConfig() *engine.Engine {
 		}
 		os.Exit(1)
 	}
+
+	// 尝试加载 extension.yaml 并合并 default-selected-modules
+	extCfg, extErr := config.LoadExtensionConfig(strings.ReplaceAll(configPath, ".modu.yaml", "extension.yaml"))
+	if extErr == nil && len(extCfg.DefaultSelectedModules) > 0 {
+		cfg.DefaultSelectedModules = extCfg.DefaultSelectedModules
+	}
+
 	return engine.New(cfg)
 }
 
@@ -713,11 +720,10 @@ func runDefaultSelect(cmd *cobra.Command, args []string) {
 		selectedNames = append(selectedNames, m.Name)
 	}
 
-	// 更新配置
-	eng.Config.DefaultSelectedModules = selectedNames
-
-	// 保存配置
-	if err := config.SaveConfig(eng.Config, configPath); err != nil {
+	// 保存到 extension.yaml（不修改 .modu.yaml）
+	extCfg := &config.ExtensionConfig{DefaultSelectedModules: selectedNames}
+	extPath := strings.ReplaceAll(configPath, ".modu.yaml", "extension.yaml")
+	if err := config.SaveExtensionConfig(extCfg, extPath); err != nil {
 		fmt.Fprintf(os.Stderr, "保存配置失败: %v\n", err)
 		os.Exit(1)
 	}

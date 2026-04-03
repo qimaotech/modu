@@ -318,6 +318,53 @@ func readGitRemoteURL(gitConfigPath string) (string, error) {
 	return "", fmt.Errorf("remote origin not found")
 }
 
+// ExtensionConfig 扩展配置（用户个性化设置，不随模块配置共享）
+type ExtensionConfig struct {
+	DefaultSelectedModules []string `yaml:"default-selected-modules"` // 创建时默认选中的模块列表
+}
+
+// SaveExtensionConfig 保存扩展配置到文件
+func SaveExtensionConfig(cfg *ExtensionConfig, path string) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal extension config: %w", err)
+	}
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("failed to resolve path: %w", err)
+	}
+
+	if err := os.WriteFile(absPath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write extension config file: %w", err)
+	}
+
+	return nil
+}
+
+// LoadExtensionConfig 加载扩展配置文件
+func LoadExtensionConfig(path string) (*ExtensionConfig, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve config path: %w", err)
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", ErrConfigNotFound, absPath)
+		}
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	var cfg ExtensionConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse yaml: %w", err)
+	}
+
+	return &cfg, nil
+}
+
 // UpdateGitignore 更新主项目的 .gitignore，添加模块目录（去重）
 func UpdateGitignore(workspacePath string, modules []Module) error {
 	gitignorePath := filepath.Join(workspacePath, ".gitignore")
