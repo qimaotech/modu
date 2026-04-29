@@ -376,6 +376,9 @@ func (m *App) initModuleSelector() {
 		return
 	}
 	m.modulesFeature = env.Name
+	if env.Branch != "" {
+		m.modulesFeature = env.Branch
+	}
 
 	existingModules := make([]string, len(env.Modules))
 	for i, mod := range env.Modules {
@@ -558,7 +561,7 @@ func (m *App) executeModulesChange() tea.Msg {
 
 	var env *core.WorktreeEnv
 	for i := range m.Envs {
-		if m.Envs[i].Name == m.modulesFeature {
+		if m.Envs[i].Name == m.modulesFeature || m.Envs[i].Branch == m.modulesFeature {
 			env = &m.Envs[i]
 			break
 		}
