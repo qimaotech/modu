@@ -372,7 +372,7 @@ func (m *App) initModuleSelector() {
 	}
 
 	// 创建模块选择器，预先选中已存在的模块
-	m.moduleSelector = NewModuleSelector(m.Engine.Config.Modules, existingModules, nil)
+	m.moduleSelector = NewModuleSelector(m.Engine.Config.Modules, existingModules, nil, nil, "选择模块")
 	m.moduleCursor = 0
 }
 
@@ -798,13 +798,15 @@ func StartTUI(configPath string) error {
 // SelectModules 让用户选择模块（空格选中，上下键切换，回车确认）
 // existingModules: 已存在的模块列表，这些模块会被预先选中
 // remoteHasBranch: 远端是否有该分支的模块，预先选中这些模块
+// defaultSelectedModules: 默认选中的模块列表，这些模块会被预先选中
+// title: 自定义标题，空字符串使用默认标题
 // 返回: 选中的模块列表, 用户是否按 q/ctrl+c 退出
-func SelectModules(modules []config.Module, existingModules []string, remoteHasBranch map[string]bool) ([]config.Module, bool, error) {
+func SelectModules(modules []config.Module, existingModules []string, remoteHasBranch map[string]bool, defaultSelectedModules []string, title string) ([]config.Module, bool, error) {
 	if len(modules) == 0 {
 		return modules, false, nil
 	}
 
-	p := tea.NewProgram(NewModuleSelector(modules, existingModules, remoteHasBranch))
+	p := tea.NewProgram(NewModuleSelector(modules, existingModules, remoteHasBranch, defaultSelectedModules, title))
 	result, runErr := p.Run()
 	if runErr != nil {
 		return nil, false, fmt.Errorf("failed to run module selector: %w", runErr)
@@ -821,9 +823,10 @@ type ModuleSelector struct {
 	selected []bool
 	cursor   int
 	quitting bool
+	title    string // 自定义标题
 }
 
-func NewModuleSelector(modules []config.Module, existingModules []string, remoteHasBranch map[string]bool) *ModuleSelector {
+func NewModuleSelector(modules []config.Module, existingModules []string, remoteHasBranch map[string]bool, defaultSelectedModules []string, title string) *ModuleSelector {
 	selected := make([]bool, len(modules))
 
 	// 创建已存在模块的 map
@@ -837,16 +840,28 @@ func NewModuleSelector(modules []config.Module, existingModules []string, remote
 		remoteHasBranch = make(map[string]bool)
 	}
 
-	// 预先选中已存在的模块或远端有该分支的模块
+	// 创建默认选中模块的 map
+	defaultSelectedMap := make(map[string]bool)
+	for _, name := range defaultSelectedModules {
+		defaultSelectedMap[name] = true
+	}
+
+	// 预先选中：已存在的模块 OR 远端有该分支的模块 OR 配置中默认选中的模块
 	for i, m := range modules {
-		if existingMap[m.Name] || remoteHasBranch[m.Name] {
+		if existingMap[m.Name] || remoteHasBranch[m.Name] || defaultSelectedMap[m.Name] {
 			selected[i] = true
 		}
+	}
+
+	// 默认标题
+	if title == "" {
+		title = "选择要创建的模块"
 	}
 
 	return &ModuleSelector{
 		modules:  modules,
 		selected: selected,
+		title:    title,
 	}
 }
 
@@ -882,7 +897,7 @@ func (m *ModuleSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *ModuleSelector) View() string {
 	var s strings.Builder
-	s.WriteString("选择要创建的模块（空格选中，回车确认）:\n\n")
+	s.WriteString(m.title + "（空格选中，回车确认）:\n\n")
 
 	for i, module := range m.modules {
 		cursor := " "

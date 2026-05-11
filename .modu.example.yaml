@@ -5,6 +5,11 @@ concurrency: 5
 auto-fetch: true
 strict-dirty-check: true
 
+# 创建 feature 时默认选中的模块（可选）
+# default-selected-modules:
+#   - frontend
+#   - backend
+
 modules:
   - name: frontend
     url: git@github.com:example/frontend.git

@@ -101,9 +101,9 @@ modules:
 	out, err := cmd.CombinedOutput()
 	t.Logf("modu list output: %s, err: %v", string(out), err)
 
-	// 测试 modu create
+	// 测试 modu create（指定模块跳过 TUI 选择）
 	featureName := "test-feat"
-	cmd = exec.Command(moduBin, "create", featureName, "-c", configPath)
+	cmd = exec.Command(moduBin, "create", featureName, "--modules", "test-repo", "-c", configPath)
 	cmd.Dir = tmpDir
 	out, err = cmd.CombinedOutput()
 	t.Logf("modu create output: %s, err: %v", string(out), err)
