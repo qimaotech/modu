@@ -250,6 +250,17 @@ func (m *App) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case "x":
+		if entry := m.selectedListEntry(); entry != nil {
+			path, err := m.getSelectedPath()
+			if err != nil {
+				m.err = err
+				m.state = "error"
+			} else {
+				cmd := exec.Command("open", "-a", "Codex", path)
+				_ = cmd.Start()
+			}
+		}
 	case "m":
 		if env := m.selectedFeatureEnv(); env != nil {
 			m.initModuleSelector()
@@ -365,6 +376,9 @@ func (m *App) initModuleSelector() {
 		return
 	}
 	m.modulesFeature = env.Name
+	if env.Branch != "" {
+		m.modulesFeature = env.Branch
+	}
 
 	existingModules := make([]string, len(env.Modules))
 	for i, mod := range env.Modules {
@@ -377,9 +391,9 @@ func (m *App) initModuleSelector() {
 }
 
 func (m *App) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	menuLen := 3
+	menuLen := 4
 	if !m.isMainProjectMenu {
-		menuLen = 5
+		menuLen = 6
 	}
 	switch msg.String() {
 	case "up", "k":
@@ -391,7 +405,24 @@ func (m *App) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.menuSelected++
 		}
 	case "enter":
-		if m.isMainProjectMenu {
+		// 检查当前选中项是否绑定了 x 快捷键（显示为 "打开 Codex (x)"）
+		isCodexItem := false
+		if m.isMainProjectMenu && m.mainProject != nil && m.menuSelected == 1 {
+			isCodexItem = true
+		} else if !m.isMainProjectMenu && m.menuSelected == 1 {
+			isCodexItem = true
+		}
+		if isCodexItem {
+			path, err := m.getSelectedPath()
+			if err != nil {
+				m.err = err
+				m.state = "error"
+			} else {
+				cmd := exec.Command("open", "-a", "Codex", path)
+				_ = cmd.Start()
+				m.state = "list"
+			}
+		} else if m.isMainProjectMenu {
 			switch m.menuSelected {
 			case 0:
 				if m.mainProject != nil {
@@ -458,6 +489,16 @@ func (m *App) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("该 feature 无主项目，无法打开: %w", ErrFeatureCannotOpen)
 			m.state = "error"
 		}
+	case "x":
+		path, err := m.getSelectedPath()
+		if err != nil {
+			m.err = err
+			m.state = "error"
+		} else {
+			cmd := exec.Command("open", "-a", "Codex", path)
+			_ = cmd.Start()
+			m.state = "list"
+		}
 	case "c":
 		m.copyPathAndBack()
 	case "u":
@@ -520,7 +561,7 @@ func (m *App) executeModulesChange() tea.Msg {
 
 	var env *core.WorktreeEnv
 	for i := range m.Envs {
-		if m.Envs[i].Name == m.modulesFeature {
+		if m.Envs[i].Name == m.modulesFeature || m.Envs[i].Branch == m.modulesFeature {
 			env = &m.Envs[i]
 			break
 		}
@@ -625,7 +666,7 @@ func (m *App) renderList() string {
 	var s strings.Builder
 	s.WriteString(headerStyle.Render("modu - Worktree Manager"))
 	s.WriteString("\n\n")
-	s.WriteString(itemStyle.Render("↑/↓ 选择  Enter 回车  m 管理模块  u 更新代码  c 复制路径\nd 删除  o 打开 VS Code  q/esc 退出"))
+	s.WriteString(itemStyle.Render("↑/↓ 选择  Enter 回车  m 管理模块  u 更新代码  c 复制路径\nd 删除  o 打开 VS Code  x 打开 Codex  q/esc 退出"))
 	s.WriteString("\n\n")
 
 	total := m.listEntryCount()
@@ -701,7 +742,7 @@ func (m *App) renderMenu() string {
 
 	if m.isMainProjectMenu && m.mainProject != nil {
 		s.WriteString(fmt.Sprintf("当前选中: %s [主项目] (<dirty状态>)\n\n", m.mainProject.Name))
-		menuItems := []string{"打开 VS Code (o)", "复制路径 (c)", "更新代码 (u)"}
+		menuItems := []string{"打开 VS Code (o)", "打开 Codex (x)", "复制路径 (c)", "更新代码 (u)"}
 		for i, item := range menuItems {
 			if i == m.menuSelected {
 				s.WriteString(selectedItemStyle.Render(fmt.Sprintf("→ %s", item)))
@@ -714,7 +755,7 @@ func (m *App) renderMenu() string {
 		if env := m.selectedFeatureEnv(); env != nil {
 			s.WriteString(fmt.Sprintf("当前选中: %s\n\n", env.Name))
 		}
-		menuItems := []string{"打开 VS Code (o)", "复制路径 (c)", "更新代码 (u)", "Modules 管理 (m)", "删除 (d)"}
+		menuItems := []string{"打开 VS Code (o)", "打开 Codex (x)", "复制路径 (c)", "更新代码 (u)", "Modules 管理 (m)", "删除 (d)"}
 		for i, item := range menuItems {
 			if i == m.menuSelected {
 				s.WriteString(selectedItemStyle.Render(fmt.Sprintf("→ %s", item)))

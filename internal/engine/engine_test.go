@@ -381,10 +381,10 @@ func TestUpdateMainProject_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{
-		Workspace:    tmp,
-		DefaultBase:  "develop",
-		Concurrency:  2,
-		Modules:      []config.Module{{Name: "m1", URL: "git@test/m1.git"}},
+		Workspace:   tmp,
+		DefaultBase: "develop",
+		Concurrency: 2,
+		Modules:     []config.Module{{Name: "m1", URL: "git@test/m1.git"}},
 	}
 	mock := &MockGitClient{
 		FetchAndSwitchBranchFunc: func(ctx context.Context, repoPath, branch string) error {
@@ -408,10 +408,10 @@ func TestUpdateMainProject_PartialFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{
-		Workspace:    tmp,
-		DefaultBase:  "develop",
-		Concurrency:  2,
-		Modules:      []config.Module{{Name: "m1", URL: "git@test/m1.git"}},
+		Workspace:   tmp,
+		DefaultBase: "develop",
+		Concurrency: 2,
+		Modules:     []config.Module{{Name: "m1", URL: "git@test/m1.git"}},
 	}
 	switchErr := errors.New("switch failed")
 	mock := &MockGitClient{
@@ -502,7 +502,7 @@ func TestCreateVSCodeWorkspace(t *testing.T) {
 
 	// 创建配置
 	cfg := &config.Config{
-		Workspace:     filepath.Join(tmpDir, "workspace"),
+		Workspace:    filepath.Join(tmpDir, "workspace"),
 		WorktreeRoot: filepath.Join(tmpDir, "worktrees"),
 		Modules: []config.Module{
 			{Name: "module1"},
@@ -580,6 +580,48 @@ func TestCreateVSCodeWorkspace(t *testing.T) {
 	if len(ws.Extensions.Recommendations) != 3 {
 		t.Errorf("expected 3 recommendations, got %d", len(ws.Extensions.Recommendations))
 	}
+
+	if ws.Modu.Feature != "test-feature" {
+		t.Errorf("expected modu feature 'test-feature', got %s", ws.Modu.Feature)
+	}
+	if ws.Modu.DirName != "test-feature" {
+		t.Errorf("expected modu dirName 'test-feature', got %s", ws.Modu.DirName)
+	}
+}
+
+func TestCreateVSCodeWorkspace_NestedFeatureMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Workspace:    filepath.Join(tmpDir, "workspace"),
+		WorktreeRoot: filepath.Join(tmpDir, "worktrees"),
+	}
+	if err := os.MkdirAll(cfg.Workspace, 0755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+	engine := New(cfg)
+	featurePath := filepath.Join(cfg.WorktreeRoot, "feature-demand-pay-cpr")
+	if err := os.MkdirAll(featurePath, 0755); err != nil {
+		t.Fatalf("failed to create feature path: %v", err)
+	}
+
+	if err := engine.createVSCodeWorkspace("feature-demand-pay-cpr", featurePath, "feature/demand-pay-cpr"); err != nil {
+		t.Fatalf("createVSCodeWorkspace failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(featurePath, "feature-demand-pay-cpr.code-workspace"))
+	if err != nil {
+		t.Fatalf("failed to read workspace file: %v", err)
+	}
+	var ws vscodeWorkspace
+	if err := json.Unmarshal(data, &ws); err != nil {
+		t.Fatalf("failed to parse workspace JSON: %v", err)
+	}
+	if ws.Modu.Feature != "feature/demand-pay-cpr" {
+		t.Errorf("expected modu feature 'feature/demand-pay-cpr', got %s", ws.Modu.Feature)
+	}
+	if ws.Modu.DirName != "feature-demand-pay-cpr" {
+		t.Errorf("expected modu dirName 'feature-demand-pay-cpr', got %s", ws.Modu.DirName)
+	}
 }
 
 func TestCreateVSCodeWorkspace_EmptyFeature(t *testing.T) {
@@ -591,7 +633,7 @@ func TestCreateVSCodeWorkspace_EmptyFeature(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	cfg := &config.Config{
-		Workspace:     filepath.Join(tmpDir, "workspace"),
+		Workspace:    filepath.Join(tmpDir, "workspace"),
 		WorktreeRoot: filepath.Join(tmpDir, "worktrees"),
 		Modules: []config.Module{
 			{Name: "module1"},
@@ -643,7 +685,7 @@ func TestCreateVSCodeWorkspace_Overwrite(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	cfg := &config.Config{
-		Workspace:     filepath.Join(tmpDir, "workspace"),
+		Workspace:    filepath.Join(tmpDir, "workspace"),
 		WorktreeRoot: filepath.Join(tmpDir, "worktrees"),
 		Modules: []config.Module{
 			{Name: "module1"},
@@ -709,7 +751,7 @@ func TestCreateVSCodeWorkspace_SkipNonModuleDirs(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	cfg := &config.Config{
-		Workspace:     filepath.Join(tmpDir, "workspace"),
+		Workspace:    filepath.Join(tmpDir, "workspace"),
 		WorktreeRoot: filepath.Join(tmpDir, "worktrees"),
 		Modules: []config.Module{
 			{Name: "module1"},
@@ -886,5 +928,64 @@ func TestGetModulesWithRemoteBranch_EmptyURL(t *testing.T) {
 
 	if len(result) != 0 {
 		t.Errorf("expected 0 modules with branch, got %d", len(result))
+	}
+}
+
+func TestAddModule_UsesWorkspaceMetadataForSlugFeature(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Workspace:    filepath.Join(tmpDir, "workspace"),
+		WorktreeRoot: filepath.Join(tmpDir, "worktrees"),
+		DefaultBase:  "develop",
+		Modules: []config.Module{
+			{Name: "module1"},
+		},
+	}
+
+	featurePath := filepath.Join(cfg.WorktreeRoot, "feature-demand-pay-cpr")
+	repoPath := filepath.Join(cfg.Workspace, "module1")
+	if err := os.MkdirAll(featurePath, 0755); err != nil {
+		t.Fatalf("failed to create feature path: %v", err)
+	}
+	if err := os.MkdirAll(repoPath, 0755); err != nil {
+		t.Fatalf("failed to create repo path: %v", err)
+	}
+	workspace := vscodeWorkspace{
+		Modu: moduWorkspaceMeta{
+			Feature: "feature/demand-pay-cpr",
+			DirName: "feature-demand-pay-cpr",
+		},
+	}
+	data, err := json.Marshal(workspace)
+	if err != nil {
+		t.Fatalf("failed to marshal workspace: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(featurePath, "feature-demand-pay-cpr.code-workspace"), data, 0644); err != nil {
+		t.Fatalf("failed to write workspace file: %v", err)
+	}
+
+	var createdBranch string
+	mock := &MockGitClient{
+		GetStatusFunc: func(ctx context.Context, path string) (gitproxy.Status, error) {
+			if path == featurePath {
+				return gitproxy.Status{Branch: "unexpected/git-branch"}, nil
+			}
+			return gitproxy.Status{Branch: "develop"}, nil
+		},
+		BranchExistsFunc: func(ctx context.Context, repoPath, branch string) bool {
+			return false
+		},
+		CreateWorktreeFunc: func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+			createdBranch = branch
+			return nil
+		},
+	}
+
+	engine := NewWithClient(cfg, mock)
+	if err := engine.AddModule(context.Background(), "feature-demand-pay-cpr", "module1"); err != nil {
+		t.Fatalf("AddModule failed: %v", err)
+	}
+	if createdBranch != "feature/demand-pay-cpr" {
+		t.Errorf("expected branch feature/demand-pay-cpr, got %s", createdBranch)
 	}
 }

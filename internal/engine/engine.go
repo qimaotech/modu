@@ -282,7 +282,7 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 	logger.Info("成功创建 feature: %s", feature)
 
 	// 创建 VSCode workspace 文件（使用目录名）
-	if err := e.createVSCodeWorkspace(dirName, featurePath); err != nil {
+	if err := e.createVSCodeWorkspace(dirName, featurePath, feature); err != nil {
 		logger.Warn("创建 VSCode workspace 文件失败: %v", err)
 	}
 
@@ -291,9 +291,10 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 
 // vscodeWorkspace VSCode workspace 配置结构
 type vscodeWorkspace struct {
-	Folder    []folder    `json:"folders"`
-	Settings  settings    `json:"settings"`
-	Extensions extensions `json:"extensions"`
+	Folder     []folder          `json:"folders"`
+	Settings   settings          `json:"settings"`
+	Extensions extensions        `json:"extensions"`
+	Modu       moduWorkspaceMeta `json:"modu"`
 }
 
 type folder struct {
@@ -301,21 +302,30 @@ type folder struct {
 }
 
 type settings struct {
-	GoToolsManagementAutoUpdate bool            `json:"go.toolsManagement.autoUpdate"`
-	GoLintTool                 string           `json:"go.lintTool"`
-	GoLintOnSave               string           `json:"go.lintOnSave"`
-	GoFormatTool               string           `json:"go.formatTool"`
-	GoUseLanguageServer        bool             `json:"go.useLanguageServer"`
-	GoAlternateTools           map[string]any  `json:"go.alternateTools"`
+	GoToolsManagementAutoUpdate bool           `json:"go.toolsManagement.autoUpdate"`
+	GoLintTool                  string         `json:"go.lintTool"`
+	GoLintOnSave                string         `json:"go.lintOnSave"`
+	GoFormatTool                string         `json:"go.formatTool"`
+	GoUseLanguageServer         bool           `json:"go.useLanguageServer"`
+	GoAlternateTools            map[string]any `json:"go.alternateTools"`
 }
 
 type extensions struct {
 	Recommendations []string `json:"recommendations"`
 }
 
+type moduWorkspaceMeta struct {
+	Feature string `json:"feature"`
+	DirName string `json:"dirName"`
+}
+
 // createVSCodeWorkspace 创建 VSCode workspace 文件
-func (e *Engine) createVSCodeWorkspace(feature, featurePath string) error {
-	workspaceFile := filepath.Join(featurePath, feature+".code-workspace")
+func (e *Engine) createVSCodeWorkspace(dirName, featurePath string, featureNames ...string) error {
+	feature := dirName
+	if len(featureNames) > 0 && featureNames[0] != "" {
+		feature = featureNames[0]
+	}
+	workspaceFile := filepath.Join(featurePath, dirName+".code-workspace")
 
 	// 构建 folders 数组：只包含 feature 中实际存在的模块
 	folders := make([]folder, 0, 8)
@@ -346,10 +356,10 @@ func (e *Engine) createVSCodeWorkspace(feature, featurePath string) error {
 		Folder: folders,
 		Settings: settings{
 			GoToolsManagementAutoUpdate: true,
-			GoLintTool:                 "golangci-lint",
-			GoLintOnSave:               "package",
-			GoFormatTool:               "gofmt",
-			GoUseLanguageServer:        true,
+			GoLintTool:                  "golangci-lint",
+			GoLintOnSave:                "package",
+			GoFormatTool:                "gofmt",
+			GoUseLanguageServer:         true,
 			GoAlternateTools: map[string]any{
 				"go": "/usr/local/go/bin/go",
 			},
@@ -360,6 +370,10 @@ func (e *Engine) createVSCodeWorkspace(feature, featurePath string) error {
 				"vue.volar",
 				"ms-vscode.vscode-typescript-next",
 			},
+		},
+		Modu: moduWorkspaceMeta{
+			Feature: feature,
+			DirName: dirName,
 		},
 	}
 
@@ -374,6 +388,26 @@ func (e *Engine) createVSCodeWorkspace(feature, featurePath string) error {
 
 	logger.Info("创建 VSCode workspace 文件: %s", workspaceFile)
 	return nil
+}
+
+func readWorkspaceFeature(featurePath, dirName string) string {
+	workspaceFile := filepath.Join(featurePath, dirName+".code-workspace")
+	data, err := os.ReadFile(workspaceFile)
+	if err != nil {
+		return ""
+	}
+	var workspace vscodeWorkspace
+	if err := json.Unmarshal(data, &workspace); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(workspace.Modu.Feature)
+}
+
+func (e *Engine) resolveWorktreeFeature(ctx context.Context, featurePath, dirName, fallback string) string {
+	if workspaceFeature := readWorkspaceFeature(featurePath, dirName); workspaceFeature != "" {
+		return workspaceFeature
+	}
+	return fallback
 }
 
 // CheckDirty 检查环境是否存在未提交修改
@@ -699,6 +733,7 @@ func (e *Engine) ListWorktrees(ctx context.Context) ([]core.WorktreeEnv, error) 
 
 		env := core.WorktreeEnv{
 			Name:        feature,
+			DirName:     entry.Name(),
 			Base:        "", // TODO: 需要从 git 获取
 			MainProject: nil,
 			Modules:     []core.ModuleStatus{},
@@ -720,6 +755,7 @@ func (e *Engine) ListWorktrees(ctx context.Context) ([]core.WorktreeEnv, error) 
 				IsDirty: status.IsDirty,
 				Branch:  status.Branch,
 			}
+			env.Branch = status.Branch
 		} else {
 			// 2. 检查是否有 workspace 子目录（兼容旧结构）
 			for _, me := range moduleEntries {
@@ -733,6 +769,7 @@ func (e *Engine) ListWorktrees(ctx context.Context) ([]core.WorktreeEnv, error) 
 							IsDirty: status.IsDirty,
 							Branch:  status.Branch,
 						}
+						env.Branch = status.Branch
 					}
 					break
 				}
@@ -796,6 +833,7 @@ func (e *Engine) GetWorktreeInfo(ctx context.Context, feature string) (*core.Wor
 
 	env := &core.WorktreeEnv{
 		Name:        feature,
+		DirName:     dirName,
 		MainProject: nil,
 		Modules:     []core.ModuleStatus{},
 	}
@@ -812,6 +850,7 @@ func (e *Engine) GetWorktreeInfo(ctx context.Context, feature string) (*core.Wor
 			IsDirty: status.IsDirty,
 			Branch:  status.Branch,
 		}
+		env.Branch = status.Branch
 	}
 
 	// 列出所有模块（子目录）
@@ -916,6 +955,7 @@ func (e *Engine) AddModule(ctx context.Context, feature, moduleName string) erro
 	if _, err := os.Stat(featurePath); os.IsNotExist(err) {
 		return fmt.Errorf("feature %s not found: %w", feature, errs.ErrFeatureNotFound)
 	}
+	targetBranch := e.resolveWorktreeFeature(ctx, featurePath, dirName, feature)
 
 	// 检查模块是否已存在
 	modulePath := filepath.Join(featurePath, moduleName)
@@ -938,44 +978,44 @@ func (e *Engine) AddModule(ctx context.Context, feature, moduleName string) erro
 	}
 
 	// 检查分支是否已存在
-	branchExists := e.GitProxy.BranchExists(ctx, repoPath, feature)
+	branchExists := e.GitProxy.BranchExists(ctx, repoPath, targetBranch)
 
 	if branchExists {
 		// 分支已存在，检查是否被其他 worktree 使用
-		isUsed, err := e.GitProxy.CheckBranchWorktreeStatus(ctx, repoPath, feature)
+		isUsed, err := e.GitProxy.CheckBranchWorktreeStatus(ctx, repoPath, targetBranch)
 		if err != nil {
 			return fmt.Errorf("failed to check branch worktree status: %w", err)
 		}
 
 		if isUsed {
 			// 分支已被其他 worktree 使用，跳过
-			logger.Info("[SKIP] %s: 分支 %s 已被其他 worktree 使用", moduleName, feature)
+			logger.Info("[SKIP] %s: 分支 %s 已被其他 worktree 使用", moduleName, targetBranch)
 			return nil
 		}
 
 		// 分支存在但未被使用，复用现有分支
-		logger.Info("复用现有分支 %s 添加模块: module=%s", feature, moduleName)
-		if err := e.GitProxy.CreateWorktreeFromExistingBranch(ctx, repoPath, feature, modulePath); err != nil {
+		logger.Info("复用现有分支 %s 添加模块: module=%s", targetBranch, moduleName)
+		if err := e.GitProxy.CreateWorktreeFromExistingBranch(ctx, repoPath, targetBranch, modulePath); err != nil {
 			return fmt.Errorf("failed to create worktree for %s: %w", moduleName, err)
 		}
-		logger.Info("成功为 feature %s 添加模块: %s", feature, moduleName)
+		logger.Info("成功为 feature %s 添加模块: %s", targetBranch, moduleName)
 
 		// 更新 VSCode workspace 文件（使用目录名）
-		if err := e.createVSCodeWorkspace(dirName, featurePath); err != nil {
+		if err := e.createVSCodeWorkspace(dirName, featurePath, targetBranch); err != nil {
 			logger.Warn("更新 VSCode workspace 文件失败: %v", err)
 		}
 		return nil
 	}
 
 	// 分支不存在，创建新分支
-	if err := e.GitProxy.CreateWorktree(ctx, repoPath, feature, branch, modulePath); err != nil {
+	if err := e.GitProxy.CreateWorktree(ctx, repoPath, targetBranch, branch, modulePath); err != nil {
 		return fmt.Errorf("failed to create worktree for %s: %w", moduleName, err)
 	}
 
-	logger.Info("成功为 feature %s 添加模块: %s", feature, moduleName)
+	logger.Info("成功为 feature %s 添加模块: %s", targetBranch, moduleName)
 
 	// 更新 VSCode workspace 文件（使用目录名）
-	if err := e.createVSCodeWorkspace(dirName, featurePath); err != nil {
+	if err := e.createVSCodeWorkspace(dirName, featurePath, targetBranch); err != nil {
 		logger.Warn("更新 VSCode workspace 文件失败: %v", err)
 	}
 	return nil
@@ -993,6 +1033,7 @@ func (e *Engine) RemoveModule(ctx context.Context, feature, moduleName string) e
 	if _, err := os.Stat(featurePath); os.IsNotExist(err) {
 		return fmt.Errorf("feature %s not found: %w", feature, errs.ErrFeatureNotFound)
 	}
+	workspaceFeature := e.resolveWorktreeFeature(ctx, featurePath, dirName, feature)
 
 	modulePath := filepath.Join(featurePath, moduleName)
 
@@ -1034,7 +1075,7 @@ func (e *Engine) RemoveModule(ctx context.Context, feature, moduleName string) e
 	logger.Info("成功为 feature %s 删除模块: %s", feature, moduleName)
 
 	// 更新 VSCode workspace 文件（使用目录名）
-	if err := e.createVSCodeWorkspace(dirName, featurePath); err != nil {
+	if err := e.createVSCodeWorkspace(dirName, featurePath, workspaceFeature); err != nil {
 		logger.Warn("更新 VSCode workspace 文件失败: %v", err)
 	}
 	return nil

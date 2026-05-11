@@ -3,6 +3,8 @@ package core
 // WorktreeEnv 表示一个 feature 环境，包含多个模块的工作树
 type WorktreeEnv struct {
 	Name        string         `json:"name"`        // Feature 名称
+	DirName     string         `json:"dirName"`     // worktree-root 下的目录名
+	Branch      string         `json:"branch"`      // 主项目真实分支名
 	Base        string         `json:"base"`        // 基准分支
 	MainProject *ModuleStatus  `json:"mainProject"` // 主项目状态（可选）
 	Modules     []ModuleStatus `json:"modules"`     // 各模块在该环境下的状态
