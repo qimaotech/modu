@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	errs "github.com/qimaotech/modu/internal/errors"
 	"gopkg.in/yaml.v3"
@@ -15,14 +17,15 @@ import (
 
 // Config modu 配置文件结构
 type Config struct {
-	Workspace             string   `yaml:"workspace"`                // 裸仓库/主仓库所在目录
-	WorktreeRoot          string   `yaml:"worktree-root"`             // 特性分支代码存放目录
-	DefaultBase           string   `yaml:"default-base"`             // 默认基准分支 (如 develop)
-	Concurrency           int      `yaml:"concurrency"`              // 并发数，默认 5
-	AutoFetch             bool     `yaml:"auto-fetch"`               // 操作前自动 fetch
-	StrictDirty           bool     `yaml:"strict-dirty-check"`       // 删除前强制脏检查
-	Modules               []Module `yaml:"modules"`                  // 模块列表
-	DefaultSelectedModules []string `yaml:"default-selected-modules"` // 创建时默认选中的模块列表
+	Workspace              string      `yaml:"workspace"`                // 裸仓库/主仓库所在目录
+	WorktreeRoot           string      `yaml:"worktree-root"`            // 特性分支代码存放目录
+	DefaultBase            string      `yaml:"default-base"`             // 默认基准分支 (如 develop)
+	Concurrency            int         `yaml:"concurrency"`              // 并发数，默认 5
+	AutoFetch              bool        `yaml:"auto-fetch"`               // 操作前自动 fetch
+	StrictDirty            bool        `yaml:"strict-dirty-check"`       // 删除前强制脏检查
+	Modules                []Module    `yaml:"modules"`                  // 模块列表
+	DefaultSelectedModules []string    `yaml:"default-selected-modules"` // 创建时默认选中的模块列表
+	AppOpeners             []AppOpener `yaml:"app-openers,omitempty"`    // TUI 操作菜单额外打开工具
 }
 
 // IsConfigNotFoundError 检查是否为配置文件不存在错误
@@ -43,6 +46,14 @@ type Module struct {
 	Name       string `yaml:"name"`                  // 模块名称
 	URL        string `yaml:"url"`                   // 仓库 URL
 	BaseBranch string `yaml:"base-branch,omitempty"` // 可选，覆盖全局设置
+}
+
+// AppOpener TUI 操作菜单中可配置的外部 App 打开工具
+type AppOpener struct {
+	Name     string `yaml:"name"`               // 稳定名称，用于区分配置项
+	App      string `yaml:"app"`                // 系统 App 名称，例如 Zed、Cursor
+	Label    string `yaml:"label,omitempty"`    // 菜单展示名，空时使用 App
+	Shortcut string `yaml:"shortcut,omitempty"` // 可选单字符快捷键
 }
 
 // LoadConfig 加载并校验配置文件
@@ -169,6 +180,7 @@ func validate(cfg *Config) error {
 	if len(cfg.Modules) == 0 {
 		validationErrs = append(validationErrs, fmt.Errorf("%w: at least one module is required", errs.ErrConfigInvalid))
 	}
+	validationErrs = append(validationErrs, validateAppOpeners(cfg)...)
 	return errors.Join(validationErrs...)
 }
 
@@ -184,7 +196,34 @@ func validateBasic(cfg *Config) error {
 	if cfg.DefaultBase == "" {
 		validationErrs = append(validationErrs, fmt.Errorf("%w: default-base is required", errs.ErrConfigInvalid))
 	}
+	validationErrs = append(validationErrs, validateAppOpeners(cfg)...)
 	return errors.Join(validationErrs...)
+}
+
+func validateAppOpeners(cfg *Config) []error {
+	var validationErrs []error
+	for i, opener := range cfg.AppOpeners {
+		prefix := fmt.Sprintf("app-openers[%d]", i)
+		if strings.TrimSpace(opener.Name) == "" {
+			validationErrs = append(validationErrs, fmt.Errorf("%w: %s.name is required", errs.ErrConfigInvalid, prefix))
+		}
+		if strings.TrimSpace(opener.App) == "" {
+			validationErrs = append(validationErrs, fmt.Errorf("%w: %s.app is required", errs.ErrConfigInvalid, prefix))
+		}
+		if opener.Shortcut == "" {
+			continue
+		}
+		if utf8.RuneCountInString(opener.Shortcut) != 1 {
+			validationErrs = append(validationErrs, fmt.Errorf("%w: %s.shortcut must be a single printable key", errs.ErrConfigInvalid, prefix))
+			continue
+		}
+		for _, r := range opener.Shortcut {
+			if !unicode.IsPrint(r) || unicode.IsSpace(r) {
+				validationErrs = append(validationErrs, fmt.Errorf("%w: %s.shortcut must be a single printable key", errs.ErrConfigInvalid, prefix))
+			}
+		}
+	}
+	return validationErrs
 }
 
 // DefaultConfig 返回默认配置模板

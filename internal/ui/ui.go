@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/atotto/clipboard"
@@ -65,11 +67,40 @@ var (
 	ErrFeatureNotFound           = errors.New("未找到 feature")
 )
 
+var (
+	isAppInstalled = defaultIsAppInstalled
+	startCommand   = defaultStartCommand
+)
+
+func defaultIsAppInstalled(app string) bool {
+	if strings.TrimSpace(app) == "" || runtime.GOOS != "darwin" {
+		return false
+	}
+	return exec.Command("open", "-Ra", app).Run() == nil
+}
+
+func defaultStartCommand(name string, args ...string) error {
+	return exec.Command(name, args...).Start()
+}
+
 // ListEntry 列表项统一接口（主项目或 feature）
 type ListEntry interface {
 	IsMainProject() bool
 	GetName() string
 	GetDirtyCount() int
+}
+
+type operationMenuItem struct {
+	label    string
+	shortcut string
+	run      func() tea.Cmd
+}
+
+func (item operationMenuItem) display() string {
+	if item.shortcut == "" {
+		return item.label
+	}
+	return fmt.Sprintf("%s (%s)", item.label, item.shortcut)
 }
 
 // MainProjectEntry 主项目列表项
@@ -109,24 +140,34 @@ type App struct {
 	Envs         []core.WorktreeEnv
 	mainProject  *engine.MainProjectStatus
 	selected     int
-	menuSelected int    // 操作菜单选中项: 0=打开VSCode, 1=Modules管理, 2=删除
+	menuSelected int    // 操作菜单选中项
 	state        string // "loading", "list", "menu", "modules", "confirm", "error"
 	feature      string
 	err          error
 	message      string
+	// 配置化 App 打开工具
+	availableAppOpeners []config.AppOpener
+	appOpenersResolved  bool
 	// 模块管理相关字段
 	moduleSelector    *ModuleSelector // 模块选择器
 	moduleCursor      int             // 模块列表光标位置
 	modulesFeature    string          // 当前操作的 feature 名称
 	isMainProjectMenu bool            // 当前菜单是否为主项目菜单
+	// 创建 feature 相关字段
+	createFeatureInput  []rune // feature 名称输入内容
+	createFeatureCursor int    // feature 名称输入光标
+	createFeatureError  string // feature 名称输入校验提示
+	createFeature       string // 当前待创建的 feature 名称
 }
 
 // New 创建 TUI App
 func New(cfg *config.Config) *App {
-	return &App{
+	app := &App{
 		Engine: engine.New(cfg),
 		state:  "loading",
 	}
+	app.resolveAvailableAppOpeners()
+	return app
 }
 
 // Model 实现 tea.Model 接口
@@ -157,6 +198,11 @@ type updateDoneMsg struct {
 
 // refreshListMsg 请求重新加载列表（如模块变更后）
 type refreshListMsg struct{}
+
+type createFeatureDoneMsg struct {
+	feature string
+	err     error
+}
 
 type errorMsg struct {
 	err error
@@ -189,6 +235,16 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case refreshListMsg:
 		m.state = "loading"
 		return m, m.loadEnvs
+	case createFeatureDoneMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.state = "error"
+			return m, nil
+		}
+		m.message = "已创建 feature: " + msg.feature
+		m.resetCreateFeature()
+		m.state = "loading"
+		return m, m.loadEnvs
 	case errorMsg:
 		m.err = msg.err
 		m.state = "error"
@@ -200,6 +256,10 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleMenuKey(msg)
 		case "modules":
 			return m.handleModulesKey(msg)
+		case "create_input":
+			return m.handleCreateInputKey(msg)
+		case "create_modules":
+			return m.handleCreateModulesKey(msg)
 		case "confirm":
 			return m.handleConfirmKey(msg)
 		case "error":
@@ -290,6 +350,8 @@ func (m *App) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case "n":
+		m.startCreateFeature()
 	case "q", "esc":
 		return m, tea.Quit
 	}
@@ -333,6 +395,25 @@ func (m *App) getSelectedPath() (string, error) {
 	return env.MainProject.Path, nil
 }
 
+// getSelectedOpenPath 获取选中项的主项目路径，用于打开工具。
+func (m *App) getSelectedOpenPath() (string, error) {
+	entry := m.selectedListEntry()
+	if entry == nil {
+		return "", fmt.Errorf("未选中任何项目: %w", ErrNoSelection)
+	}
+	if entry.IsMainProject() {
+		if m.mainProject == nil {
+			return "", fmt.Errorf("主项目信息不存在: %w", ErrMainProjectNotFound)
+		}
+		return m.mainProject.Path, nil
+	}
+	env := m.selectedFeatureEnv()
+	if env == nil || env.MainProject == nil {
+		return "", fmt.Errorf("该 feature 无主项目，无法打开: %w", ErrFeatureCannotOpen)
+	}
+	return env.MainProject.Path, nil
+}
+
 // copyPathAndBack 复制路径并返回列表视图
 func (m *App) copyPathAndBack() {
 	path, err := m.getSelectedPath()
@@ -347,6 +428,150 @@ func (m *App) copyPathAndBack() {
 		return
 	}
 	m.message = "路径已复制: " + path
+	m.state = "list"
+}
+
+func (m *App) ensureAvailableAppOpeners() {
+	if !m.appOpenersResolved {
+		m.resolveAvailableAppOpeners()
+	}
+}
+
+func (m *App) resolveAvailableAppOpeners() {
+	m.availableAppOpeners = nil
+	if m.Engine == nil || m.Engine.Config == nil {
+		m.appOpenersResolved = true
+		return
+	}
+	for _, opener := range m.Engine.Config.AppOpeners {
+		if isAppInstalled(opener.App) {
+			m.availableAppOpeners = append(m.availableAppOpeners, opener)
+		}
+	}
+	m.appOpenersResolved = true
+}
+
+func (m *App) operationMenuItems() []operationMenuItem {
+	m.ensureAvailableAppOpeners()
+
+	items := []operationMenuItem{
+		{label: "打开 VS Code", shortcut: "o", run: m.openVSCodeSelected},
+		{label: "打开 Codex", shortcut: "x", run: func() tea.Cmd {
+			m.openAppByName("Codex")
+			return nil
+		}},
+	}
+
+	items = append(items, m.configuredAppOpenerMenuItems()...)
+	items = append(items, operationMenuItem{label: "复制路径", shortcut: "c", run: func() tea.Cmd {
+		m.copyPathAndBack()
+		return nil
+	}})
+
+	if m.isMainProjectMenu {
+		items = append(items, operationMenuItem{label: "更新代码", shortcut: "u", run: func() tea.Cmd {
+			m.state = "loading"
+			return m.executeUpdateCode()
+		}})
+		return items
+	}
+
+	items = append(items,
+		operationMenuItem{label: "更新代码", shortcut: "u", run: func() tea.Cmd {
+			if env := m.selectedFeatureEnv(); env != nil {
+				m.state = "loading"
+				return m.executeUpdateWorktree(env.Name)
+			}
+			return nil
+		}},
+		operationMenuItem{label: "Modules 管理", shortcut: "m", run: func() tea.Cmd {
+			m.initModuleSelector()
+			m.state = "modules"
+			return nil
+		}},
+		operationMenuItem{label: "删除", shortcut: "d", run: func() tea.Cmd {
+			if env := m.selectedFeatureEnv(); env != nil {
+				m.state = "confirm"
+				m.feature = env.Name
+			}
+			return nil
+		}},
+	)
+	return items
+}
+
+func (m *App) configuredAppOpenerMenuItems() []operationMenuItem {
+	reserved := builtinMenuShortcuts()
+	shortcutCounts := make(map[string]int)
+	for _, opener := range m.availableAppOpeners {
+		key := normalizeMenuShortcut(opener.Shortcut)
+		if key != "" {
+			shortcutCounts[key]++
+		}
+	}
+
+	items := make([]operationMenuItem, 0, len(m.availableAppOpeners))
+	for _, opener := range m.availableAppOpeners {
+		opener := opener
+		label := "打开 " + appOpenerLabel(opener)
+		shortcut := normalizeMenuShortcut(opener.Shortcut)
+		if shortcut != "" && (reserved[shortcut] || shortcutCounts[shortcut] > 1) {
+			shortcut = ""
+		}
+		items = append(items, operationMenuItem{label: label, shortcut: shortcut, run: func() tea.Cmd {
+			m.openAppByName(opener.App)
+			return nil
+		}})
+	}
+	return items
+}
+
+func builtinMenuShortcuts() map[string]bool {
+	return map[string]bool{
+		"o": true,
+		"x": true,
+		"c": true,
+		"u": true,
+		"m": true,
+		"d": true,
+		"q": true,
+	}
+}
+
+func normalizeMenuShortcut(shortcut string) string {
+	if shortcut == "" {
+		return ""
+	}
+	return strings.ToLower(shortcut)
+}
+
+func appOpenerLabel(opener config.AppOpener) string {
+	if strings.TrimSpace(opener.Label) != "" {
+		return strings.TrimSpace(opener.Label)
+	}
+	return strings.TrimSpace(opener.App)
+}
+
+func (m *App) openVSCodeSelected() tea.Cmd {
+	path, err := m.getSelectedOpenPath()
+	if err != nil {
+		m.err = err
+		m.state = "error"
+		return nil
+	}
+	_ = startCommand("code", path)
+	m.state = "list"
+	return nil
+}
+
+func (m *App) openAppByName(appName string) {
+	path, err := m.getSelectedOpenPath()
+	if err != nil {
+		m.err = err
+		m.state = "error"
+		return
+	}
+	_ = startCommand("open", "-a", appName, path)
 	m.state = "list"
 }
 
@@ -391,126 +616,35 @@ func (m *App) initModuleSelector() {
 }
 
 func (m *App) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	menuLen := 4
-	if !m.isMainProjectMenu {
-		menuLen = 6
+	menuItems := m.operationMenuItems()
+	if len(menuItems) == 0 {
+		m.state = "list"
+		return m, nil
 	}
+	if m.menuSelected >= len(menuItems) {
+		m.menuSelected = len(menuItems) - 1
+	}
+
 	switch msg.String() {
 	case "up", "k":
 		if m.menuSelected > 0 {
 			m.menuSelected--
 		}
 	case "down", "j":
-		if m.menuSelected < menuLen-1 {
+		if m.menuSelected < len(menuItems)-1 {
 			m.menuSelected++
 		}
 	case "enter":
-		// 检查当前选中项是否绑定了 x 快捷键（显示为 "打开 Codex (x)"）
-		isCodexItem := false
-		if m.isMainProjectMenu && m.mainProject != nil && m.menuSelected == 1 {
-			isCodexItem = true
-		} else if !m.isMainProjectMenu && m.menuSelected == 1 {
-			isCodexItem = true
-		}
-		if isCodexItem {
-			path, err := m.getSelectedPath()
-			if err != nil {
-				m.err = err
-				m.state = "error"
-			} else {
-				cmd := exec.Command("open", "-a", "Codex", path)
-				_ = cmd.Start()
-				m.state = "list"
-			}
-		} else if m.isMainProjectMenu {
-			switch m.menuSelected {
-			case 0:
-				if m.mainProject != nil {
-					cmd := exec.Command("code", m.mainProject.Path)
-					_ = cmd.Start()
-					m.state = "list"
-				}
-			case 1:
-				m.copyPathAndBack()
-			case 2:
-				m.state = "loading"
-				return m, m.executeUpdateCode()
-			}
-		} else {
-			switch m.menuSelected {
-			case 0:
-				if env := m.selectedFeatureEnv(); env != nil && env.MainProject != nil {
-					cmd := exec.Command("code", env.MainProject.Path)
-					_ = cmd.Start()
-					m.state = "list"
-				} else {
-					m.err = fmt.Errorf("该 feature 无主项目，无法打开: %w", ErrFeatureCannotOpen)
-					m.state = "error"
-				}
-			case 1:
-				m.copyPathAndBack()
-			case 2:
-				if env := m.selectedFeatureEnv(); env != nil {
-					m.state = "loading"
-					return m, m.executeUpdateWorktree(env.Name)
-				}
-			case 3:
-				m.initModuleSelector()
-				m.state = "modules"
-			case 4:
-				if env := m.selectedFeatureEnv(); env != nil {
-					m.state = "confirm"
-					m.feature = env.Name
-				}
-			}
-		}
-	case "m":
-		if !m.isMainProjectMenu {
-			m.initModuleSelector()
-			m.state = "modules"
-		}
-	case "d":
-		if !m.isMainProjectMenu {
-			m.state = "confirm"
-			if env := m.selectedFeatureEnv(); env != nil {
-				m.feature = env.Name
-			}
-		}
-	case "o":
-		if m.isMainProjectMenu && m.mainProject != nil {
-			cmd := exec.Command("code", m.mainProject.Path)
-			_ = cmd.Start()
-			m.state = "list"
-		} else if env := m.selectedFeatureEnv(); env != nil && env.MainProject != nil {
-			cmd := exec.Command("code", env.MainProject.Path)
-			_ = cmd.Start()
-			m.state = "list"
-		} else if !m.isMainProjectMenu {
-			m.err = fmt.Errorf("该 feature 无主项目，无法打开: %w", ErrFeatureCannotOpen)
-			m.state = "error"
-		}
-	case "x":
-		path, err := m.getSelectedPath()
-		if err != nil {
-			m.err = err
-			m.state = "error"
-		} else {
-			cmd := exec.Command("open", "-a", "Codex", path)
-			_ = cmd.Start()
-			m.state = "list"
-		}
-	case "c":
-		m.copyPathAndBack()
-	case "u":
-		if m.isMainProjectMenu {
-			m.state = "loading"
-			return m, m.executeUpdateCode()
-		} else if env := m.selectedFeatureEnv(); env != nil {
-			m.state = "loading"
-			return m, m.executeUpdateWorktree(env.Name)
-		}
+		return m, menuItems[m.menuSelected].run()
 	case "q", "esc":
 		m.state = "list"
+	default:
+		key := normalizeMenuShortcut(msg.String())
+		for _, item := range menuItems {
+			if item.shortcut != "" && item.shortcut == key {
+				return m, item.run()
+			}
+		}
 	}
 	return m, nil
 }
@@ -540,6 +674,134 @@ func (m *App) handleModulesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *App) startCreateFeature() {
+	m.state = "create_input"
+	m.createFeatureInput = nil
+	m.createFeatureCursor = 0
+	m.createFeatureError = ""
+	m.createFeature = ""
+	m.moduleSelector = nil
+	m.moduleCursor = 0
+}
+
+func (m *App) resetCreateFeature() {
+	m.createFeatureInput = nil
+	m.createFeatureCursor = 0
+	m.createFeatureError = ""
+	m.createFeature = ""
+	m.moduleSelector = nil
+	m.moduleCursor = 0
+}
+
+func (m *App) cancelCreateFeature() {
+	m.resetCreateFeature()
+	m.state = "list"
+}
+
+func (m *App) handleCreateInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.clampCreateFeatureCursor()
+
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.cancelCreateFeature()
+	case "enter":
+		feature := strings.TrimSpace(string(m.createFeatureInput))
+		if feature == "" {
+			m.createFeatureError = "feature 名称不能为空"
+			return m, nil
+		}
+		m.createFeature = feature
+		m.createFeatureError = ""
+		m.initCreateModuleSelector()
+		m.state = "create_modules"
+	case "left":
+		if m.createFeatureCursor > 0 {
+			m.createFeatureCursor--
+		}
+	case "right":
+		if m.createFeatureCursor < len(m.createFeatureInput) {
+			m.createFeatureCursor++
+		}
+	case "home":
+		m.createFeatureCursor = 0
+	case "end":
+		m.createFeatureCursor = len(m.createFeatureInput)
+	case "backspace", "ctrl+h":
+		if m.createFeatureCursor > 0 {
+			m.createFeatureInput = append(m.createFeatureInput[:m.createFeatureCursor-1], m.createFeatureInput[m.createFeatureCursor:]...)
+			m.createFeatureCursor--
+			m.createFeatureError = ""
+		}
+	case "delete":
+		if m.createFeatureCursor < len(m.createFeatureInput) {
+			m.createFeatureInput = append(m.createFeatureInput[:m.createFeatureCursor], m.createFeatureInput[m.createFeatureCursor+1:]...)
+			m.createFeatureError = ""
+		}
+	default:
+		if len(msg.Runes) > 0 {
+			input := make([]rune, 0, len(m.createFeatureInput)+len(msg.Runes))
+			input = append(input, m.createFeatureInput[:m.createFeatureCursor]...)
+			input = append(input, msg.Runes...)
+			input = append(input, m.createFeatureInput[m.createFeatureCursor:]...)
+			m.createFeatureInput = input
+			m.createFeatureCursor += len(msg.Runes)
+			m.createFeatureError = ""
+		}
+	}
+	return m, nil
+}
+
+func (m *App) clampCreateFeatureCursor() {
+	if m.createFeatureCursor < 0 {
+		m.createFeatureCursor = 0
+	}
+	if m.createFeatureCursor > len(m.createFeatureInput) {
+		m.createFeatureCursor = len(m.createFeatureInput)
+	}
+}
+
+func (m *App) initCreateModuleSelector() {
+	var modules []config.Module
+	var defaultSelected []string
+	remoteHasBranch := make(map[string]bool)
+
+	if m.Engine != nil && m.Engine.Config != nil {
+		modules = m.Engine.Config.Modules
+		defaultSelected = m.Engine.Config.DefaultSelectedModules
+		var err error
+		remoteHasBranch, err = m.Engine.GetModulesWithRemoteBranch(context.Background(), m.createFeature)
+		if err != nil {
+			remoteHasBranch = make(map[string]bool)
+		}
+	}
+
+	m.moduleSelector = NewModuleSelector(modules, nil, remoteHasBranch, defaultSelected, "选择要创建的项目/模块")
+	m.moduleCursor = 0
+}
+
+func (m *App) handleCreateModulesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.moduleCursor > 0 {
+			m.moduleCursor--
+		}
+	case "down", "j":
+		if m.moduleSelector != nil && m.moduleCursor < len(m.moduleSelector.modules)-1 {
+			m.moduleCursor++
+		}
+	case " ":
+		if m.moduleSelector != nil && m.moduleCursor >= 0 && m.moduleCursor < len(m.moduleSelector.selected) {
+			m.moduleSelector.selected[m.moduleCursor] = !m.moduleSelector.selected[m.moduleCursor]
+		}
+	case "enter":
+		m.state = "loading"
+		return m, m.executeCreateFeature()
+	case "q", "esc", "ctrl+c":
+		m.cancelCreateFeature()
+	}
+	return m, nil
+}
+
 // executeUpdateCode 执行主项目+模块更新，返回在后台运行并发送 updateDoneMsg 的 Cmd
 func (m *App) executeUpdateCode() tea.Cmd {
 	return func() tea.Msg {
@@ -553,6 +815,28 @@ func (m *App) executeUpdateWorktree(feature string) tea.Cmd {
 	return func() tea.Msg {
 		success, failed := m.Engine.UpdateWorktree(context.Background(), feature)
 		return updateDoneMsg{success: success, failed: failed, feature: feature}
+	}
+}
+
+func (m *App) executeCreateFeature() tea.Cmd {
+	feature := m.createFeature
+	var selectedModules []config.Module
+	if m.moduleSelector != nil {
+		selectedModules = m.moduleSelector.SelectedModules()
+	}
+
+	return func() tea.Msg {
+		if m.Engine == nil || m.Engine.Config == nil || m.Engine.GitProxy == nil {
+			return createFeatureDoneMsg{feature: feature, err: errors.New("TUI 引擎未初始化")}
+		}
+
+		createCfg := *m.Engine.Config
+		createCfg.Modules = append([]config.Module(nil), selectedModules...)
+		createEngine := engine.NewWithClient(&createCfg, m.Engine.GitProxy)
+		if err := createEngine.CreateWorktree(context.Background(), feature, createCfg.DefaultBase); err != nil {
+			return createFeatureDoneMsg{feature: feature, err: err}
+		}
+		return createFeatureDoneMsg{feature: feature}
 	}
 }
 
@@ -628,6 +912,10 @@ func (m *App) View() string {
 		return m.renderMenu()
 	case "modules":
 		return m.renderModules()
+	case "create_input":
+		return m.renderCreateInput()
+	case "create_modules":
+		return m.renderCreateModules()
 	case "confirm":
 		return m.renderConfirm()
 	case "error":
@@ -666,7 +954,7 @@ func (m *App) renderList() string {
 	var s strings.Builder
 	s.WriteString(headerStyle.Render("modu - Worktree Manager"))
 	s.WriteString("\n\n")
-	s.WriteString(itemStyle.Render("↑/↓ 选择  Enter 回车  m 管理模块  u 更新代码  c 复制路径\nd 删除  o 打开 VS Code  x 打开 Codex  q/esc 退出"))
+	s.WriteString(itemStyle.Render("↑/↓ 选择  Enter 回车  n 新建 feature  m 管理模块  u 更新代码  c 复制路径\nd 删除  o 打开 VS Code  x 打开 Codex  q/esc 退出"))
 	s.WriteString("\n\n")
 
 	total := m.listEntryCount()
@@ -742,28 +1030,22 @@ func (m *App) renderMenu() string {
 
 	if m.isMainProjectMenu && m.mainProject != nil {
 		s.WriteString(fmt.Sprintf("当前选中: %s [主项目] (<dirty状态>)\n\n", m.mainProject.Name))
-		menuItems := []string{"打开 VS Code (o)", "打开 Codex (x)", "复制路径 (c)", "更新代码 (u)"}
-		for i, item := range menuItems {
-			if i == m.menuSelected {
-				s.WriteString(selectedItemStyle.Render(fmt.Sprintf("→ %s", item)))
-			} else {
-				s.WriteString(itemStyle.Render(fmt.Sprintf("  %s", item)))
-			}
-			s.WriteString("\n")
-		}
 	} else {
 		if env := m.selectedFeatureEnv(); env != nil {
 			s.WriteString(fmt.Sprintf("当前选中: %s\n\n", env.Name))
 		}
-		menuItems := []string{"打开 VS Code (o)", "打开 Codex (x)", "复制路径 (c)", "更新代码 (u)", "Modules 管理 (m)", "删除 (d)"}
-		for i, item := range menuItems {
-			if i == m.menuSelected {
-				s.WriteString(selectedItemStyle.Render(fmt.Sprintf("→ %s", item)))
-			} else {
-				s.WriteString(itemStyle.Render(fmt.Sprintf("  %s", item)))
-			}
-			s.WriteString("\n")
+	}
+	menuItems := m.operationMenuItems()
+	if m.menuSelected >= len(menuItems) && len(menuItems) > 0 {
+		m.menuSelected = len(menuItems) - 1
+	}
+	for i, item := range menuItems {
+		if i == m.menuSelected {
+			s.WriteString(selectedItemStyle.Render(fmt.Sprintf("→ %s", item.display())))
+		} else {
+			s.WriteString(itemStyle.Render(fmt.Sprintf("  %s", item.display())))
 		}
+		s.WriteString("\n")
 	}
 	s.WriteString("\n")
 	s.WriteString(itemStyle.Render("按 ↑/↓ 选择，Enter 执行，esc 返回"))
@@ -806,6 +1088,78 @@ func (m *App) renderModules() string {
 	s.WriteString("\n")
 	s.WriteString(itemStyle.Render("空格切换选择，Enter 确认，q/esc 返回"))
 	return s.String()
+}
+
+func (m *App) renderCreateInput() string {
+	var s strings.Builder
+	s.WriteString(headerStyle.Render("新建 feature"))
+	s.WriteString("\n\n")
+	s.WriteString("请输入 feature 名称:\n\n")
+	s.WriteString(selectedItemStyle.Render(m.renderCreateFeatureInputValue()))
+	s.WriteString("\n\n")
+	if m.createFeatureError != "" {
+		s.WriteString(errorStyle.Render(m.createFeatureError))
+		s.WriteString("\n\n")
+	}
+	s.WriteString(itemStyle.Render("Enter 继续，Esc/Ctrl+C 取消"))
+	return s.String()
+}
+
+func (m *App) renderCreateFeatureInputValue() string {
+	m.clampCreateFeatureCursor()
+	before := string(m.createFeatureInput[:m.createFeatureCursor])
+	after := string(m.createFeatureInput[m.createFeatureCursor:])
+	return before + "▌" + after
+}
+
+func (m *App) renderCreateModules() string {
+	var s strings.Builder
+	s.WriteString(headerStyle.Render("新建 feature"))
+	s.WriteString("\n\n")
+	s.WriteString(fmt.Sprintf("当前 feature: %s\n\n", m.createFeature))
+	s.WriteString(successStyle.Render(fmt.Sprintf("[x] 主项目: %s（始终创建）", m.createMainProjectName())))
+	s.WriteString("\n")
+
+	if m.moduleSelector == nil || len(m.moduleSelector.modules) == 0 {
+		s.WriteString(itemStyle.Render("未配置可选模块，将只创建主项目。"))
+		s.WriteString("\n\n")
+		s.WriteString(itemStyle.Render("Enter 创建，q/esc 取消"))
+		return s.String()
+	}
+
+	for i, module := range m.moduleSelector.modules {
+		cursor := " "
+		if m.moduleCursor == i {
+			cursor = ">"
+		}
+
+		checkbox := "[ ]"
+		if m.moduleSelector.selected[i] {
+			checkbox = "[x]"
+		}
+
+		line := fmt.Sprintf("%s %s %s", cursor, checkbox, module.Name)
+		if m.moduleCursor == i {
+			s.WriteString(selectedItemStyle.Render(line))
+		} else {
+			s.WriteString(itemStyle.Render(line))
+		}
+		s.WriteString("\n")
+	}
+
+	s.WriteString("\n")
+	s.WriteString(itemStyle.Render("空格切换模块，Enter 创建，q/esc 取消"))
+	return s.String()
+}
+
+func (m *App) createMainProjectName() string {
+	if m.mainProject != nil && m.mainProject.Name != "" {
+		return m.mainProject.Name
+	}
+	if m.Engine != nil && m.Engine.Config != nil && m.Engine.Config.Workspace != "" {
+		return filepath.Base(m.Engine.Config.Workspace)
+	}
+	return "主项目"
 }
 
 func (m *App) renderError() string {

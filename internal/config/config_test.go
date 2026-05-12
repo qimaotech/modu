@@ -152,6 +152,172 @@ modules:
 	}
 }
 
+func TestLoadConfig_AppOpeners(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		assert  func(t *testing.T, cfg *Config)
+	}{
+		{
+			name: "zed opener example",
+			content: `workspace: /opt/workspace
+worktree-root: /opt/worktrees
+default-base: develop
+modules:
+  - name: auth-svc
+    url: git@github.com:example/auth-svc.git
+app-openers:
+  - name: zed
+    app: Zed
+    label: Zed
+    shortcut: z
+`,
+			assert: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				if len(cfg.AppOpeners) != 1 {
+					t.Fatalf("expected 1 app opener, got %d", len(cfg.AppOpeners))
+				}
+				opener := cfg.AppOpeners[0]
+				if opener.Name != "zed" || opener.App != "Zed" || opener.Label != "Zed" || opener.Shortcut != "z" {
+					t.Fatalf("unexpected opener: %+v", opener)
+				}
+			},
+		},
+		{
+			name: "missing app openers remains compatible",
+			content: `workspace: /opt/workspace
+worktree-root: /opt/worktrees
+default-base: develop
+modules:
+  - name: auth-svc
+    url: git@github.com:example/auth-svc.git
+`,
+			assert: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				if len(cfg.AppOpeners) != 0 {
+					t.Fatalf("expected no app openers, got %d", len(cfg.AppOpeners))
+				}
+			},
+		},
+		{
+			name: "opener without shortcut",
+			content: `workspace: /opt/workspace
+worktree-root: /opt/worktrees
+default-base: develop
+modules:
+  - name: auth-svc
+    url: git@github.com:example/auth-svc.git
+app-openers:
+  - name: cursor
+    app: Cursor
+`,
+			assert: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				if len(cfg.AppOpeners) != 1 {
+					t.Fatalf("expected 1 app opener, got %d", len(cfg.AppOpeners))
+				}
+				if cfg.AppOpeners[0].Shortcut != "" {
+					t.Fatalf("expected empty shortcut, got %q", cfg.AppOpeners[0].Shortcut)
+				}
+			},
+		},
+		{
+			name: "shortcut conflict loads",
+			content: `workspace: /opt/workspace
+worktree-root: /opt/worktrees
+default-base: develop
+modules:
+  - name: auth-svc
+    url: git@github.com:example/auth-svc.git
+app-openers:
+  - name: cursor
+    app: Cursor
+    shortcut: c
+`,
+			assert: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				if len(cfg.AppOpeners) != 1 || cfg.AppOpeners[0].Shortcut != "c" {
+					t.Fatalf("expected conflicting shortcut to load for TUI resolution, got %+v", cfg.AppOpeners)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, ".modu.yaml")
+			if err := os.WriteFile(configPath, []byte(tt.content), 0644); err != nil {
+				t.Fatalf("failed to write test config: %v", err)
+			}
+
+			cfg, err := LoadConfig(configPath)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			tt.assert(t, cfg)
+		})
+	}
+}
+
+func TestLoadConfig_AppOpenersValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		openerYAML  string
+		errContains string
+	}{
+		{
+			name: "missing opener name",
+			openerYAML: `  - app: Zed
+    shortcut: z
+`,
+			errContains: "name is required",
+		},
+		{
+			name: "missing app name",
+			openerYAML: `  - name: zed
+    shortcut: z
+`,
+			errContains: "app is required",
+		},
+		{
+			name: "shortcut has multiple characters",
+			openerYAML: `  - name: zed
+    app: Zed
+    shortcut: zz
+`,
+			errContains: "shortcut",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, ".modu.yaml")
+			content := `workspace: /opt/workspace
+worktree-root: /opt/worktrees
+default-base: develop
+modules:
+  - name: auth-svc
+    url: git@github.com:example/auth-svc.git
+app-openers:
+` + tt.openerYAML
+
+			if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+				t.Fatalf("failed to write test config: %v", err)
+			}
+
+			_, err := LoadConfig(configPath)
+			if err == nil {
+				t.Fatal("expected validation error, got nil")
+			}
+			if !contains(err.Error(), tt.errContains) {
+				t.Fatalf("expected error containing %q, got %q", tt.errContains, err.Error())
+			}
+		})
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsAt(s, substr))
 }
@@ -201,7 +367,7 @@ func TestSaveConfig(t *testing.T) {
 		Workspace:    "/test/workspace",
 		WorktreeRoot: "/test/worktrees",
 		DefaultBase:  "main",
-		Concurrency: 3,
+		Concurrency:  3,
 		AutoFetch:    false,
 		StrictDirty:  false,
 		Modules: []Module{
@@ -248,7 +414,7 @@ func TestSaveConfig_InvalidPath(t *testing.T) {
 		Workspace:    "/test",
 		WorktreeRoot: "/test",
 		DefaultBase:  "main",
-		Modules:     []Module{},
+		Modules:      []Module{},
 	}
 
 	err := SaveConfig(cfg, "/invalid/path/that/does/not/exist/test.yaml")
