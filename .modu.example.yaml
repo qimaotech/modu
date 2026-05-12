@@ -10,6 +10,23 @@ strict-dirty-check: true
 #   - frontend
 #   - backend
 
+# TUI 操作菜单自定义打开工具（可选）
+# - name: 稳定名称，必填
+# - app: macOS open -a 可识别的 App 名称，必填；启动时用 open -Ra 判断是否已安装
+# - label: 菜单展示名，可选；为空时使用 app
+# - shortcut: 操作菜单快捷键，可选；必须是单个可打印字符
+# 未安装的 App 不展示；快捷键与内置项冲突时，该 App 仍展示，但不显示也不绑定快捷键
+app-openers:
+  - name: zed
+    app: Zed
+    label: Zed
+    shortcut: z
+  # 示例：如果 c 与内置“复制路径”冲突，菜单仍显示 Cursor，但不显示 "(c)"
+  - name: cursor
+    app: Cursor
+    label: Cursor
+    shortcut: c
+
 modules:
   - name: frontend
     url: git@github.com:example/frontend.git

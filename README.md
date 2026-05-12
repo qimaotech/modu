@@ -44,6 +44,12 @@ modules:
     url: https://github.com/example/frontend.git
   - name: backend
     url: https://github.com/example/backend.git
+
+app-openers:
+  - name: zed
+    app: Zed
+    label: Zed
+    shortcut: z
 ```
 
 **配置项说明：**
@@ -57,6 +63,7 @@ modules:
 | `auto-fetch`             | 否   | 操作前自动 fetch          |
 | `strict-dirty-check`     | 否   | 删除前强制脏检查          |
 | `default-selected-modules` | 否   | 创建 feature 时默认选中的模块列表（可通过 `modu default-select` 命令配置） |
+| `app-openers`           | 否   | TUI 操作菜单中的自定义打开工具 |
 | `modules`               | 是   | 模块列表                  |
 
 **模块配置：**
@@ -66,6 +73,17 @@ modules:
 | `name`        | 是   | 模块名称         |
 | `url`         | 是   | Git 仓库地址     |
 | `base-branch` | 否   | 覆盖全局默认分支 |
+
+**App opener 配置：**
+
+| 字段       | 必填 | 说明                                      |
+| ---------- | ---- | ----------------------------------------- |
+| `name`     | 是   | 稳定名称，例如 `zed`                      |
+| `app`      | 是   | macOS `open -a` 可识别的 App 名称         |
+| `label`    | 否   | 菜单展示名，空时使用 `app`                |
+| `shortcut` | 否   | 操作菜单快捷键，必须是单个可打印字符      |
+
+TUI 启动时会检测 `app` 是否已安装；未安装的工具不会出现在操作菜单中。若 `shortcut` 与内置快捷键冲突，菜单仍显示该工具，但不展示也不绑定该快捷键。
 
 **环境变量：**
 
@@ -150,6 +168,7 @@ modu config scan --module "backend=..."       # 扫描并添加模块
 
 # 查看版本信息
 modu version
+```
 
 ### TUI 快捷键
 
@@ -157,13 +176,19 @@ modu version
 | ------ | ------------------------------- |
 | ↑/↓    | 上下选择 feature                 |
 | Enter  | 回车确认                        |
+| n      | 新建 feature                    |
 | c      | 复制路径到剪贴板                 |
 | d      | 删除选中 feature                 |
 | m      | 管理模块（仅 feature 有效）      |
 | o      | 用 VS Code 打开主项目           |
+| x      | 用 Codex 打开主项目             |
+| z      | 用配置的 Zed 打开主项目（示例） |
 | u      | 更新代码                         |
 | q/esc  | 退出 TUI                       |
 
+配置化 App opener 只在对应 App 已安装时显示；快捷键冲突时可通过操作菜单选中后按 Enter 执行。
+
+```bash
 # 创建配置文件
 modu config create
 modu config create --module "frontend=git@github.com:example/frontend.git"

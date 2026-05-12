@@ -1,6 +1,9 @@
 package ui
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,6 +12,7 @@ import (
 	"github.com/qimaotech/modu/internal/config"
 	"github.com/qimaotech/modu/internal/core"
 	"github.com/qimaotech/modu/internal/engine"
+	"github.com/qimaotech/modu/internal/gitproxy"
 )
 
 // TestMainProjectEntry_IsMainProject 主项目列表项返回 true
@@ -429,7 +433,7 @@ func TestApp_getSelectedPath_Feature(t *testing.T) {
 	app := &App{
 		mainProject: &engine.MainProjectStatus{Name: "main"},
 		Envs: []core.WorktreeEnv{{
-			Name: "feat-a",
+			Name:        "feat-a",
 			MainProject: &core.ModuleStatus{Name: "main", Path: "/path/to/main"},
 		}},
 		selected: 1,
@@ -486,4 +490,551 @@ func TestApp_copyPathAndBack_ClipboardError(t *testing.T) {
 	if app.state != "error" && app.state != "list" {
 		t.Errorf("copyPathAndBack() 后 state 应为 error 或 list, got %q", app.state)
 	}
+}
+
+func TestApp_renderMenu_ConfiguredAppOpeners(t *testing.T) {
+	withAppOpenerHooks(t, map[string]bool{
+		"Zed":    true,
+		"Cursor": true,
+	})
+
+	app := New(&config.Config{
+		Workspace:    "/workspace/main",
+		WorktreeRoot: "/workspace/worktrees",
+		DefaultBase:  "develop",
+		AppOpeners: []config.AppOpener{
+			{Name: "zed", App: "Zed", Label: "Zed", Shortcut: "z"},
+			{Name: "ghost", App: "Ghost", Label: "Ghost", Shortcut: "g"},
+			{Name: "cursor", App: "Cursor", Label: "Cursor", Shortcut: "c"},
+		},
+	})
+	app.state = "menu"
+	app.mainProject = &engine.MainProjectStatus{Name: "main", Path: "/workspace/main"}
+	app.selected = 0
+	app.isMainProjectMenu = true
+
+	view := app.renderMenu()
+	if !strings.Contains(view, "打开 Zed (z)") {
+		t.Fatalf("menu should render installed Zed opener with shortcut, got:\n%s", view)
+	}
+	if strings.Contains(view, "打开 Ghost") {
+		t.Fatalf("menu should hide missing app opener, got:\n%s", view)
+	}
+	if !strings.Contains(view, "打开 Cursor") {
+		t.Fatalf("menu should keep conflict opener selectable, got:\n%s", view)
+	}
+	if strings.Contains(view, "打开 Cursor (c)") {
+		t.Fatalf("menu should hide conflicting shortcut, got:\n%s", view)
+	}
+
+	codexIndex := strings.Index(view, "打开 Codex")
+	zedIndex := strings.Index(view, "打开 Zed")
+	copyIndex := strings.Index(view, "复制路径")
+	if !(codexIndex >= 0 && zedIndex > codexIndex && copyIndex > zedIndex) {
+		t.Fatalf("custom openers should render after built-in openers and before copy, got:\n%s", view)
+	}
+}
+
+func TestApp_handleMenuKey_ConfiguredAppOpenerShortcutAndEnter(t *testing.T) {
+	calls := withAppOpenerHooks(t, map[string]bool{"Zed": true})
+	app := New(&config.Config{
+		Workspace:    "/workspace/main",
+		WorktreeRoot: "/workspace/worktrees",
+		DefaultBase:  "develop",
+		AppOpeners: []config.AppOpener{
+			{Name: "zed", App: "Zed", Label: "Zed", Shortcut: "z"},
+		},
+	})
+	app.state = "menu"
+	app.mainProject = &engine.MainProjectStatus{Name: "main", Path: "/workspace/main"}
+	app.selected = 0
+	app.isMainProjectMenu = true
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
+	if cmd != nil {
+		t.Fatal("configured app opener shortcut should not return a tea command")
+	}
+	assertStartedCommand(t, *calls, 0, "open", "-a", "Zed", "/workspace/main")
+	if app.state != "list" {
+		t.Fatalf("after opening configured app state = %q, want list", app.state)
+	}
+
+	app.state = "menu"
+	app.menuSelected = 2
+	_, cmd = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("configured app opener enter should not return a tea command")
+	}
+	assertStartedCommand(t, *calls, 1, "open", "-a", "Zed", "/workspace/main")
+	if app.state != "list" {
+		t.Fatalf("after entering configured app state = %q, want list", app.state)
+	}
+}
+
+func TestApp_handleMenuKey_ConfiguredShortcutConflictKeepsBuiltIn(t *testing.T) {
+	calls := withAppOpenerHooks(t, map[string]bool{"Cursor": true})
+	app := New(&config.Config{
+		Workspace:    "/workspace/main",
+		WorktreeRoot: "/workspace/worktrees",
+		DefaultBase:  "develop",
+		AppOpeners: []config.AppOpener{
+			{Name: "cursor", App: "Cursor", Label: "Cursor", Shortcut: "c"},
+		},
+	})
+	app.state = "menu"
+	app.mainProject = &engine.MainProjectStatus{Name: "main", Path: "/workspace/main"}
+	app.selected = 0
+	app.isMainProjectMenu = true
+
+	_, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	if len(*calls) != 0 {
+		t.Fatalf("conflicting c shortcut should trigger built-in copy, not Cursor open, got %+v", *calls)
+	}
+}
+
+func TestApp_handleMenuKey_ConfiguredAppOpenerMissingPath(t *testing.T) {
+	calls := withAppOpenerHooks(t, map[string]bool{"Zed": true})
+	app := New(&config.Config{
+		Workspace:    "/workspace/main",
+		WorktreeRoot: "/workspace/worktrees",
+		DefaultBase:  "develop",
+		AppOpeners: []config.AppOpener{
+			{Name: "zed", App: "Zed", Label: "Zed", Shortcut: "z"},
+		},
+	})
+	app.state = "menu"
+	app.Envs = []core.WorktreeEnv{{Name: "feat-a"}}
+	app.selected = 0
+	app.isMainProjectMenu = false
+
+	_, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
+	if app.state != "error" {
+		t.Fatalf("missing main project path should move to error, got %q", app.state)
+	}
+	if app.err == nil || !strings.Contains(app.err.Error(), "无法打开") {
+		t.Fatalf("missing main project path should show open error, got %v", app.err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("missing path should not start app, got %+v", *calls)
+	}
+}
+
+// TestApp_ListKey_StartCreateAndQuit 保持列表 q 退出，同时新增 n 创建入口
+func TestApp_ListKey_StartCreateAndQuit(t *testing.T) {
+	app := &App{state: "list"}
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if cmd != nil {
+		t.Error("按 n 进入创建输入不应返回命令")
+	}
+	if app.state != "create_input" {
+		t.Fatalf("按 n 后 state = %q，期望 create_input", app.state)
+	}
+
+	app = &App{state: "list"}
+	_, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd == nil {
+		t.Error("列表视图按 q 应保持退出行为")
+	}
+}
+
+type uiStartedCommand struct {
+	name string
+	args []string
+}
+
+func withAppOpenerHooks(t *testing.T, installed map[string]bool) *[]uiStartedCommand {
+	t.Helper()
+
+	oldIsAppInstalled := isAppInstalled
+	oldStartCommand := startCommand
+	calls := []uiStartedCommand{}
+
+	isAppInstalled = func(app string) bool {
+		return installed[app]
+	}
+	startCommand = func(name string, args ...string) error {
+		calls = append(calls, uiStartedCommand{name: name, args: append([]string(nil), args...)})
+		return nil
+	}
+
+	t.Cleanup(func() {
+		isAppInstalled = oldIsAppInstalled
+		startCommand = oldStartCommand
+	})
+	return &calls
+}
+
+func assertStartedCommand(t *testing.T, calls []uiStartedCommand, index int, name string, args ...string) {
+	t.Helper()
+	if len(calls) <= index {
+		t.Fatalf("expected command call %d, got %d calls: %+v", index, len(calls), calls)
+	}
+	call := calls[index]
+	if call.name != name {
+		t.Fatalf("command name = %q, want %q", call.name, name)
+	}
+	if len(call.args) != len(args) {
+		t.Fatalf("command args = %v, want %v", call.args, args)
+	}
+	for i := range args {
+		if call.args[i] != args[i] {
+			t.Fatalf("command args = %v, want %v", call.args, args)
+		}
+	}
+}
+
+// TestApp_renderList_IncludesCreateShortcut 列表帮助展示创建快捷键
+func TestApp_renderList_IncludesCreateShortcut(t *testing.T) {
+	app := &App{state: "list"}
+	view := app.renderList()
+	if !strings.Contains(view, "n 新建 feature") {
+		t.Fatalf("renderList() 应包含创建快捷键，got:\n%s", view)
+	}
+}
+
+// TestApp_CreateInput_QIsText 输入状态下 q 是普通文本
+func TestApp_CreateInput_QIsText(t *testing.T) {
+	app := &App{state: "create_input"}
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd != nil {
+		t.Error("输入 q 不应退出或返回命令")
+	}
+	if app.state != "create_input" {
+		t.Fatalf("输入 q 后 state = %q，期望 create_input", app.state)
+	}
+	if got := string(app.createFeatureInput); got != "q" {
+		t.Fatalf("输入内容 = %q，期望 q", got)
+	}
+}
+
+// TestApp_CreateInput_CursorMovement 光标可左右和首尾移动
+func TestApp_CreateInput_CursorMovement(t *testing.T) {
+	app := &App{state: "create_input", createFeatureInput: []rune("abcd"), createFeatureCursor: 2}
+
+	app.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if app.createFeatureCursor != 1 {
+		t.Fatalf("left 后 cursor = %d，期望 1", app.createFeatureCursor)
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if app.createFeatureCursor != 2 {
+		t.Fatalf("right 后 cursor = %d，期望 2", app.createFeatureCursor)
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyHome})
+	if app.createFeatureCursor != 0 {
+		t.Fatalf("home 后 cursor = %d，期望 0", app.createFeatureCursor)
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	if app.createFeatureCursor != 4 {
+		t.Fatalf("end 后 cursor = %d，期望 4", app.createFeatureCursor)
+	}
+}
+
+// TestApp_CreateInput_InsertAndDeleteAtCursor 支持光标位置插入和删除
+func TestApp_CreateInput_InsertAndDeleteAtCursor(t *testing.T) {
+	app := &App{state: "create_input", createFeatureInput: []rune("abcd"), createFeatureCursor: 2}
+
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if got := string(app.createFeatureInput); got != "abqcd" {
+		t.Fatalf("插入后 input = %q，期望 abqcd", got)
+	}
+	if app.createFeatureCursor != 3 {
+		t.Fatalf("插入后 cursor = %d，期望 3", app.createFeatureCursor)
+	}
+
+	app.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if got := string(app.createFeatureInput); got != "abcd" {
+		t.Fatalf("backspace 后 input = %q，期望 abcd", got)
+	}
+	if app.createFeatureCursor != 2 {
+		t.Fatalf("backspace 后 cursor = %d，期望 2", app.createFeatureCursor)
+	}
+
+	app.Update(tea.KeyMsg{Type: tea.KeyDelete})
+	if got := string(app.createFeatureInput); got != "abd" {
+		t.Fatalf("delete 后 input = %q，期望 abd", got)
+	}
+	if app.createFeatureCursor != 2 {
+		t.Fatalf("delete 后 cursor = %d，期望 2", app.createFeatureCursor)
+	}
+}
+
+// TestApp_CreateInput_EmptyNameValidation 空名称停留在输入状态并提示
+func TestApp_CreateInput_EmptyNameValidation(t *testing.T) {
+	app := &App{state: "create_input", createFeatureInput: []rune("   "), createFeatureCursor: 3}
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("空名称不应返回命令")
+	}
+	if app.state != "create_input" {
+		t.Fatalf("空名称后 state = %q，期望 create_input", app.state)
+	}
+	if app.createFeatureError == "" {
+		t.Fatal("空名称应设置中文校验提示")
+	}
+}
+
+// TestApp_CreateInput_Cancel Esc/Ctrl+C 取消创建输入
+func TestApp_CreateInput_Cancel(t *testing.T) {
+	app := &App{state: "create_input", createFeatureInput: []rune("feat"), createFeatureCursor: 4}
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Error("Esc 取消不应返回命令")
+	}
+	if app.state != "list" {
+		t.Fatalf("Esc 后 state = %q，期望 list", app.state)
+	}
+
+	app = &App{state: "create_input", createFeatureInput: []rune("feat"), createFeatureCursor: 4}
+	app.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if app.state != "list" {
+		t.Fatalf("Ctrl+C 后 state = %q，期望 list", app.state)
+	}
+}
+
+// TestApp_CreateInput_ValidNameInitializesSelection 有效名称进入项目选择并应用默认/远程预选
+func TestApp_CreateInput_ValidNameInitializesSelection(t *testing.T) {
+	fake := &uiFakeGitClient{remoteBranches: map[string]bool{"git@example.com:m2.git|feat-a": true}}
+	app := &App{
+		Engine: engine.NewWithClient(&config.Config{
+			Workspace:              t.TempDir(),
+			WorktreeRoot:           t.TempDir(),
+			DefaultBase:            "develop",
+			DefaultSelectedModules: []string{"m1"},
+			Modules: []config.Module{
+				{Name: "m1", URL: "git@example.com:m1.git"},
+				{Name: "m2", URL: "git@example.com:m2.git"},
+				{Name: "m3", URL: "git@example.com:m3.git"},
+			},
+			Concurrency: 2,
+		}, fake),
+		state:               "create_input",
+		createFeatureInput:  []rune("feat-a"),
+		createFeatureCursor: len("feat-a"),
+	}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("初始化选择不应返回命令")
+	}
+	if app.state != "create_modules" {
+		t.Fatalf("有效名称后 state = %q，期望 create_modules", app.state)
+	}
+	if app.createFeature != "feat-a" {
+		t.Fatalf("createFeature = %q，期望 feat-a", app.createFeature)
+	}
+	if app.moduleSelector == nil {
+		t.Fatal("moduleSelector 不应为空")
+	}
+	if !app.moduleSelector.selected[0] || !app.moduleSelector.selected[1] || app.moduleSelector.selected[2] {
+		t.Fatalf("期望 m1 默认选中、m2 远程选中、m3 未选中，got %v", app.moduleSelector.selected)
+	}
+}
+
+// TestApp_CreateModules_Cancel 项目选择取消不调用创建
+func TestApp_CreateModules_Cancel(t *testing.T) {
+	fake := &uiFakeGitClient{}
+	app := &App{
+		Engine:         engine.NewWithClient(&config.Config{Workspace: t.TempDir(), WorktreeRoot: t.TempDir()}, fake),
+		state:          "create_modules",
+		createFeature:  "feat-a",
+		moduleSelector: NewModuleSelector([]config.Module{{Name: "m1"}}, nil, nil, nil, ""),
+	}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd != nil {
+		t.Error("取消选择不应返回命令")
+	}
+	if app.state != "list" {
+		t.Fatalf("取消后 state = %q，期望 list", app.state)
+	}
+	if len(fake.createWorktreeCalls) != 0 {
+		t.Fatalf("取消不应创建 worktree，got %v", fake.createWorktreeCalls)
+	}
+}
+
+// TestApp_CreateModules_ConfirmCreatesSelectedModules 确认后只创建选中的模块
+func TestApp_CreateModules_ConfirmCreatesSelectedModules(t *testing.T) {
+	app, fake := newCreateFeatureTestApp(t)
+	app.moduleSelector.selected = []bool{true, false}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("确认选择应返回创建命令")
+	}
+	_ = cmd()
+
+	if len(fake.createWorktreeCalls) != 2 {
+		t.Fatalf("期望创建主项目和 m1 两个 worktree，got %d: %v", len(fake.createWorktreeCalls), fake.createWorktreeCalls)
+	}
+	if fake.createWorktreeCalls[0].branch != "feat-a" || fake.createWorktreeCalls[0].baseBranch != "develop" {
+		t.Fatalf("主项目创建参数不正确: %+v", fake.createWorktreeCalls[0])
+	}
+	if fake.createWorktreeCalls[1].repoPath != filepath.Join(app.Engine.Config.Workspace, "m1") {
+		t.Fatalf("期望只创建 m1，got %+v", fake.createWorktreeCalls[1])
+	}
+}
+
+// TestApp_CreateModules_ConfirmCreatesMainOnly 零模块选择时只创建主项目
+func TestApp_CreateModules_ConfirmCreatesMainOnly(t *testing.T) {
+	app, fake := newCreateFeatureTestApp(t)
+	app.moduleSelector.selected = []bool{false, false}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("确认零模块选择应返回创建命令")
+	}
+	_ = cmd()
+
+	if len(fake.createWorktreeCalls) != 1 {
+		t.Fatalf("期望仅创建主项目 worktree，got %d: %v", len(fake.createWorktreeCalls), fake.createWorktreeCalls)
+	}
+}
+
+// TestApp_CreateFeatureDone_SuccessReloadsList 创建成功后展示消息并触发列表刷新
+func TestApp_CreateFeatureDone_SuccessReloadsList(t *testing.T) {
+	app := &App{
+		Engine:              engine.NewWithClient(&config.Config{Workspace: t.TempDir(), WorktreeRoot: t.TempDir()}, &uiFakeGitClient{}),
+		state:               "loading",
+		createFeature:       "feat-a",
+		createFeatureInput:  []rune("feat-a"),
+		createFeatureCursor: len("feat-a"),
+	}
+
+	_, cmd := app.Update(createFeatureDoneMsg{feature: "feat-a"})
+	if app.state != "loading" {
+		t.Fatalf("成功后 state = %q，期望 loading 以刷新列表", app.state)
+	}
+	if app.message != "已创建 feature: feat-a" {
+		t.Fatalf("成功消息 = %q", app.message)
+	}
+	if app.createFeature != "" || len(app.createFeatureInput) != 0 {
+		t.Fatalf("成功后应清理创建状态, feature=%q input=%q", app.createFeature, string(app.createFeatureInput))
+	}
+	if cmd == nil {
+		t.Fatal("成功后应返回刷新列表命令")
+	}
+}
+
+// TestApp_CreateFeatureDone_ErrorShowsError 创建失败后进入错误状态
+func TestApp_CreateFeatureDone_ErrorShowsError(t *testing.T) {
+	app := &App{state: "loading"}
+
+	_, cmd := app.Update(createFeatureDoneMsg{feature: "feat-a", err: os.ErrInvalid})
+	if cmd != nil {
+		t.Error("失败后不应返回刷新命令")
+	}
+	if app.state != "error" {
+		t.Fatalf("失败后 state = %q，期望 error", app.state)
+	}
+	if app.err == nil {
+		t.Fatal("失败后应保留错误")
+	}
+}
+
+func newCreateFeatureTestApp(t *testing.T) (*App, *uiFakeGitClient) {
+	t.Helper()
+
+	workspace := t.TempDir()
+	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
+	for _, name := range []string{"m1", "m2"} {
+		if err := os.MkdirAll(filepath.Join(workspace, name), 0755); err != nil {
+			t.Fatalf("创建测试模块目录失败: %v", err)
+		}
+	}
+
+	fake := &uiFakeGitClient{}
+	cfg := &config.Config{
+		Workspace:    workspace,
+		WorktreeRoot: worktreeRoot,
+		DefaultBase:  "develop",
+		Modules: []config.Module{
+			{Name: "m1", URL: "git@example.com:m1.git"},
+			{Name: "m2", URL: "git@example.com:m2.git"},
+		},
+		Concurrency: 2,
+	}
+	app := &App{
+		Engine:         engine.NewWithClient(cfg, fake),
+		state:          "create_modules",
+		createFeature:  "feat-a",
+		moduleSelector: NewModuleSelector(cfg.Modules, nil, nil, nil, ""),
+	}
+	return app, fake
+}
+
+type uiFakeCreateWorktreeCall struct {
+	repoPath     string
+	branch       string
+	baseBranch   string
+	worktreePath string
+}
+
+type uiFakeGitClient struct {
+	remoteBranches      map[string]bool
+	createWorktreeCalls []uiFakeCreateWorktreeCall
+}
+
+func (f *uiFakeGitClient) Clone(ctx context.Context, url, path string) error {
+	return nil
+}
+
+func (f *uiFakeGitClient) CreateWorktree(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+	f.createWorktreeCalls = append(f.createWorktreeCalls, uiFakeCreateWorktreeCall{
+		repoPath:     repoPath,
+		branch:       branch,
+		baseBranch:   baseBranch,
+		worktreePath: worktreePath,
+	})
+	return os.MkdirAll(worktreePath, 0755)
+}
+
+func (f *uiFakeGitClient) GetStatus(ctx context.Context, path string) (gitproxy.Status, error) {
+	return gitproxy.Status{Branch: "feat-a"}, nil
+}
+
+func (f *uiFakeGitClient) RemoveWorktree(ctx context.Context, path string) error {
+	return nil
+}
+
+func (f *uiFakeGitClient) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktreePath, featureDirName string) error {
+	return nil
+}
+
+func (f *uiFakeGitClient) ListWorktrees(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error) {
+	return nil, nil
+}
+
+func (f *uiFakeGitClient) Fetch(ctx context.Context, repoPath string) error {
+	return nil
+}
+
+func (f *uiFakeGitClient) Rebase(ctx context.Context, path string) error {
+	return nil
+}
+
+func (f *uiFakeGitClient) FetchAndSwitchBranch(ctx context.Context, repoPath, branch string) error {
+	return nil
+}
+
+func (f *uiFakeGitClient) BranchExists(ctx context.Context, repoPath, branch string) bool {
+	return false
+}
+
+func (f *uiFakeGitClient) CheckBranchWorktreeStatus(ctx context.Context, repoPath, branch string) (bool, error) {
+	return false, nil
+}
+
+func (f *uiFakeGitClient) CreateWorktreeFromExistingBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
+	return os.MkdirAll(worktreePath, 0755)
+}
+
+func (f *uiFakeGitClient) RemoteBranchExists(ctx context.Context, repoURL, branch string) bool {
+	if f.remoteBranches == nil {
+		return false
+	}
+	return f.remoteBranches[repoURL+"|"+branch]
+}
+
+func (f *uiFakeGitClient) CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
+	return os.MkdirAll(worktreePath, 0755)
 }
