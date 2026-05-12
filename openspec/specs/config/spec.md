@@ -34,7 +34,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `name` | string | 是 | 配置项标识 |
-| `app` | string | 是 | macOS `open -a` 使用的应用名称 |
+| `app` | string | 是 | macOS“应用程序”中的应用名称，例如 VS Code 应填 `Visual Studio Code`，而不是 `vscode` 或 CLI 命令 `code` |
 | `label` | string | 否 | 操作菜单展示名称；为空时使用 `app` |
 | `shortcut` | string | 否 | 操作菜单直接执行快捷键，必须是单个可打印字符 |
 
@@ -78,7 +78,7 @@ app-openers:
 
 ### Requirement: Configurable app openers
 
-配置文件 SHALL support an optional `app-openers` list for declaring extra GUI applications that can open the currently selected project path from the TUI operation menu.
+配置文件 SHALL support an optional `app-openers` list for declaring extra GUI applications that can open the currently selected project path from the TUI operation menu. Each opener's `app` field SHALL use the macOS application name as shown in Applications, not a short alias or CLI command.
 
 #### Scenario: Load Zed opener example
 - **WHEN** `.modu.yaml` contains an `app-openers` entry with `name: zed`, `app: Zed`, `label: Zed`, and `shortcut: z`

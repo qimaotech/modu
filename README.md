@@ -79,7 +79,7 @@ app-openers:
 | 字段       | 必填 | 说明                                      |
 | ---------- | ---- | ----------------------------------------- |
 | `name`     | 是   | 稳定名称，例如 `zed`                      |
-| `app`      | 是   | macOS `open -a` 可识别的 App 名称         |
+| `app`      | 是   | macOS“应用程序”中的 App 名称，例如 VS Code 应填 `Visual Studio Code`，而不是 `vscode` 或 CLI 命令 `code` |
 | `label`    | 否   | 菜单展示名，空时使用 `app`                |
 | `shortcut` | 否   | 操作菜单快捷键，必须是单个可打印字符      |
 
