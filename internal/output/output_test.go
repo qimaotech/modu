@@ -1,6 +1,7 @@
 package output
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -96,33 +97,50 @@ func TestFormatCreateResponse_Json_Failure(t *testing.T) {
 // TestFormatDeleteResponse_Text_Success 测试文本格式删除成功响应
 func TestFormatDeleteResponse_Text_Success(t *testing.T) {
 	formatter := New("text")
+	backupPath := "/worktrees/.modu/backups/20260515-153012_feature-test.tar.gz"
 
-	output := formatter.FormatDeleteResponse("feature-test", nil)
+	output := formatter.FormatDeleteResponse("feature-test", nil, backupPath)
 
 	if !contains(output, "已删除 feature: feature-test") {
 		t.Error("expected success message")
+	}
+	if !contains(output, "备份文件: "+backupPath) {
+		t.Error("expected backup path")
 	}
 }
 
 // TestFormatDeleteResponse_Text_Failure 测试文本格式删除失败响应
 func TestFormatDeleteResponse_Text_Failure(t *testing.T) {
 	formatter := New("text")
+	backupPath := "/worktrees/.modu/backups/20260515-153012_feature-test.tar.gz"
 
-	output := formatter.FormatDeleteResponse("feature-test", []error{errTest})
+	output := formatter.FormatDeleteResponse("feature-test", []error{errTest}, backupPath)
 
 	if !contains(output, "删除 feature 失败: feature-test") {
 		t.Error("expected failure message")
+	}
+	if contains(output, "备份文件:") {
+		t.Error("expected failure output to stay compatible without backup path")
 	}
 }
 
 // TestFormatDeleteResponse_Json 测试 JSON 格式删除响应
 func TestFormatDeleteResponse_Json(t *testing.T) {
 	formatter := New("json")
+	backupPath := "/worktrees/.modu/backups/20260515-153012_feature-test.tar.gz"
 
-	output := formatter.FormatDeleteResponse("feature-test", nil)
+	output := formatter.FormatDeleteResponse("feature-test", nil, backupPath)
 
 	if !contains(output, `"action"`) || !contains(output, "delete") {
 		t.Error("expected action in JSON")
+	}
+
+	var resp DeleteResponse
+	if err := json.Unmarshal([]byte(output), &resp); err != nil {
+		t.Fatalf("unexpected json error: %v", err)
+	}
+	if resp.BackupPath != backupPath {
+		t.Fatalf("expected backupPath %q, got %q", backupPath, resp.BackupPath)
 	}
 }
 

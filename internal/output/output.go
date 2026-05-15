@@ -27,11 +27,12 @@ type CreateResponse struct {
 
 // DeleteResponse 删除操作的响应
 type DeleteResponse struct {
-	Success bool     `json:"success"`
-	Action  string   `json:"action"`
-	Feature string   `json:"feature"`
-	Results []Result `json:"results"`
-	Errors  []string `json:"errors"`
+	Success    bool     `json:"success"`
+	Action     string   `json:"action"`
+	Feature    string   `json:"feature"`
+	BackupPath string   `json:"backupPath,omitempty"`
+	Results    []Result `json:"results"`
+	Errors     []string `json:"errors"`
 }
 
 // ErrorResponse 错误响应
@@ -113,12 +114,18 @@ func (f *Formatter) FormatCreateResponse(feature string, results []Result, errs 
 }
 
 // FormatDeleteResponse 格式化删除响应
-func (f *Formatter) FormatDeleteResponse(feature string, errs []error) string {
+func (f *Formatter) FormatDeleteResponse(feature string, errs []error, backupPath ...string) string {
+	resolvedBackupPath := ""
+	if len(errs) == 0 && len(backupPath) > 0 {
+		resolvedBackupPath = backupPath[0]
+	}
+
 	if f.format == "json" {
 		resp := DeleteResponse{
-			Success: len(errs) == 0,
-			Action:  "delete",
-			Feature: feature,
+			Success:    len(errs) == 0,
+			Action:     "delete",
+			Feature:    feature,
+			BackupPath: resolvedBackupPath,
 		}
 		for _, e := range errs {
 			resp.Errors = append(resp.Errors, e.Error())
@@ -134,6 +141,9 @@ func (f *Formatter) FormatDeleteResponse(feature string, errs []error) string {
 	var sb strings.Builder
 	if len(errs) == 0 {
 		sb.WriteString(fmt.Sprintf("✓ 已删除 feature: %s\n", feature))
+		if resolvedBackupPath != "" {
+			sb.WriteString(fmt.Sprintf("  备份文件: %s\n", resolvedBackupPath))
+		}
 	} else {
 		sb.WriteString(fmt.Sprintf("✗ 删除 feature 失败: %s\n", feature))
 		for _, e := range errs {

@@ -73,9 +73,7 @@ app-openers:
     label: Zed
     shortcut: z
 ```
-
 ## Requirements
-
 ### Requirement: Configurable app openers
 
 配置文件 SHALL support an optional `app-openers` list for declaring extra GUI applications that can open the currently selected project path from the TUI operation menu. Each opener's `app` field SHALL use the macOS application name as shown in Applications, not a short alias or CLI command.
@@ -111,6 +109,21 @@ Each configured app opener MUST include enough information to identify the app a
 #### Scenario: Shortcut conflict does not invalidate config
 - **WHEN** an `app-openers` entry sets `shortcut: c` and `c` is already used by a built-in TUI menu action
 - **THEN** config loading still succeeds because shortcut conflict resolution is handled by the TUI menu
+
+### Requirement: Delete backup retention configuration
+The config SHALL support an optional `delete-backup.retention-days` value that controls how many days delete backup archives are retained. When `delete-backup` or `retention-days` is omitted, or `retention-days` is zero, config loading SHALL default the value to 30 days.
+
+#### Scenario: Load config without delete backup settings
+- **WHEN** `.modu.yaml` omits `delete-backup`
+- **THEN** config loading succeeds with delete backup retention set to 30 days
+
+#### Scenario: Load config with custom retention
+- **WHEN** `.modu.yaml` contains `delete-backup.retention-days: 7`
+- **THEN** config loading succeeds with delete backup retention set to 7 days
+
+#### Scenario: Reject negative retention
+- **WHEN** `.modu.yaml` contains `delete-backup.retention-days: -1`
+- **THEN** config loading fails with `ERR_CONFIG_INVALID`
 
 ## 与代码的对应
 

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	errs "github.com/qimaotech/modu/internal/errors"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -149,6 +151,73 @@ modules:
 
 	if cfg.Concurrency != 5 {
 		t.Errorf("expected default concurrency 5, got %d", cfg.Concurrency)
+	}
+}
+
+func TestLoadConfig_DeleteBackupRetention(t *testing.T) {
+	tests := []struct {
+		name          string
+		deleteBackup  string
+		wantRetention int
+		wantErr       bool
+	}{
+		{
+			name:          "missing delete backup defaults to 30",
+			wantRetention: 30,
+		},
+		{
+			name: "zero retention defaults to 30",
+			deleteBackup: `delete-backup:
+  retention-days: 0
+`,
+			wantRetention: 30,
+		},
+		{
+			name: "custom retention",
+			deleteBackup: `delete-backup:
+  retention-days: 7
+`,
+			wantRetention: 7,
+		},
+		{
+			name: "negative retention is invalid",
+			deleteBackup: `delete-backup:
+  retention-days: -1
+`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, ".modu.yaml")
+			content := `workspace: /opt/workspace
+worktree-root: /opt/worktrees
+default-base: develop
+modules:
+  - name: auth-svc
+    url: git@github.com:example/auth-svc.git
+` + tt.deleteBackup
+
+			if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+				t.Fatalf("failed to write test config: %v", err)
+			}
+
+			cfg, err := LoadConfig(configPath)
+			if tt.wantErr {
+				if !errors.Is(err, errs.ErrConfigInvalid) {
+					t.Fatalf("expected ERR_CONFIG_INVALID, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.DeleteBackup.RetentionDays != tt.wantRetention {
+				t.Fatalf("expected retention %d, got %d", tt.wantRetention, cfg.DeleteBackup.RetentionDays)
+			}
+		})
 	}
 }
 
@@ -356,6 +425,9 @@ func TestDefaultConfig(t *testing.T) {
 	if len(cfg.Modules) != 0 {
 		t.Errorf("expected empty modules, got %d", len(cfg.Modules))
 	}
+	if cfg.DeleteBackup.RetentionDays != 30 {
+		t.Errorf("expected delete backup retention 30, got %d", cfg.DeleteBackup.RetentionDays)
+	}
 }
 
 // TestSaveConfig 测试保存配置
@@ -370,6 +442,7 @@ func TestSaveConfig(t *testing.T) {
 		Concurrency:  3,
 		AutoFetch:    false,
 		StrictDirty:  false,
+		DeleteBackup: DeleteBackupConfig{RetentionDays: 14},
 		Modules: []Module{
 			{Name: "test-module", URL: "git@example.com:test/module.git"},
 		},
@@ -402,6 +475,9 @@ func TestSaveConfig(t *testing.T) {
 	}
 	if loadedCfg.Concurrency != cfg.Concurrency {
 		t.Errorf("expected concurrency %d, got %d", cfg.Concurrency, loadedCfg.Concurrency)
+	}
+	if loadedCfg.DeleteBackup.RetentionDays != cfg.DeleteBackup.RetentionDays {
+		t.Errorf("expected delete backup retention %d, got %d", cfg.DeleteBackup.RetentionDays, loadedCfg.DeleteBackup.RetentionDays)
 	}
 	if len(loadedCfg.Modules) != 1 {
 		t.Errorf("expected 1 module, got %d", len(loadedCfg.Modules))
@@ -760,6 +836,70 @@ default-base: develop
 	}
 	if len(cfg.Modules) != 0 {
 		t.Errorf("expected 0 modules, got %d", len(cfg.Modules))
+	}
+}
+
+func TestLoadConfigForScan_DeleteBackupRetention(t *testing.T) {
+	tests := []struct {
+		name          string
+		deleteBackup  string
+		wantRetention int
+		wantErr       bool
+	}{
+		{
+			name:          "missing delete backup defaults to 30",
+			wantRetention: 30,
+		},
+		{
+			name: "zero retention defaults to 30",
+			deleteBackup: `delete-backup:
+  retention-days: 0
+`,
+			wantRetention: 30,
+		},
+		{
+			name: "custom retention",
+			deleteBackup: `delete-backup:
+  retention-days: 7
+`,
+			wantRetention: 7,
+		},
+		{
+			name: "negative retention is invalid",
+			deleteBackup: `delete-backup:
+  retention-days: -1
+`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, ".modu.yaml")
+			content := `workspace: /opt/workspace
+worktree-root: /opt/worktrees
+default-base: develop
+` + tt.deleteBackup
+
+			if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+				t.Fatalf("failed to write test config: %v", err)
+			}
+
+			cfg, err := LoadConfigForScan(configPath)
+			if tt.wantErr {
+				if !errors.Is(err, errs.ErrConfigInvalid) {
+					t.Fatalf("expected ERR_CONFIG_INVALID, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.DeleteBackup.RetentionDays != tt.wantRetention {
+				t.Fatalf("expected retention %d, got %d", tt.wantRetention, cfg.DeleteBackup.RetentionDays)
+			}
+		})
 	}
 }
 

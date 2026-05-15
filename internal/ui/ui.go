@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -578,12 +579,16 @@ func (m *App) openAppByName(appName string) {
 func (m *App) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "enter":
-		err := m.Engine.DeleteWorktree(context.Background(), m.feature, false)
+		result, err := m.Engine.DeleteWorktree(context.Background(), m.feature, false)
 		if err != nil {
 			m.err = err
 			m.state = "error"
 		} else {
-			m.message = "已删除 feature: " + m.feature
+			backupPath := ""
+			if result != nil {
+				backupPath = result.BackupPath
+			}
+			m.message = fmt.Sprintf("已删除 feature: %s\n备份文件: %s", m.feature, backupPath)
 			m.state = "loading"
 			m.selected = 0
 			return m, m.loadEnvs
@@ -1181,13 +1186,18 @@ func Run(cfg *config.Config) error {
 	return nil
 }
 
+var runTUI = Run
+
 // StartTUI 启动 TUI（从 CLI 调用）
 func StartTUI(configPath string) error {
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-	return Run(cfg)
+	if err := engine.New(cfg).CleanupDeleteBackups(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "警告: 清理过期备份失败: %v\n", err)
+	}
+	return runTUI(cfg)
 }
 
 // SelectModules 让用户选择模块（空格选中，上下键切换，回车确认）

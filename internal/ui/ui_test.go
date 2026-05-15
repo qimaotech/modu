@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -365,6 +366,45 @@ func TestApp_View_Confirm(t *testing.T) {
 	view := app.renderConfirm()
 	if view == "" || len(view) < 8 {
 		t.Error("renderConfirm() 应包含确认文案")
+	}
+}
+
+func TestApp_HandleConfirmKey_DeleteSuccessShowsBackupPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "workspace")
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	featurePath := filepath.Join(worktreeRoot, "feat-to-delete")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+	if err := os.MkdirAll(featurePath, 0755); err != nil {
+		t.Fatalf("failed to create feature path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(featurePath, "file.txt"), []byte("content"), 0644); err != nil {
+		t.Fatalf("failed to write feature file: %v", err)
+	}
+
+	app := &App{
+		Engine: engine.NewWithClient(&config.Config{
+			Workspace:    workspace,
+			WorktreeRoot: worktreeRoot,
+		}, &uiFakeGitClient{}),
+		state:   "confirm",
+		feature: "feat-to-delete",
+	}
+
+	_, cmd := app.handleConfirmKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd == nil {
+		t.Fatal("expected delete success to reload list")
+	}
+	if app.state != "loading" {
+		t.Fatalf("state = %q, 期望 loading", app.state)
+	}
+	if !strings.Contains(app.message, "已删除 feature: feat-to-delete") {
+		t.Fatalf("missing delete message: %q", app.message)
+	}
+	if !strings.Contains(app.message, "备份文件: ") || !strings.Contains(app.message, ".tar.gz") {
+		t.Fatalf("missing backup path in message: %q", app.message)
 	}
 }
 
@@ -928,6 +968,63 @@ func TestApp_CreateFeatureDone_ErrorShowsError(t *testing.T) {
 	}
 	if app.err == nil {
 		t.Fatal("失败后应保留错误")
+	}
+}
+
+func TestStartTUI_CleansExpiredBackupsBeforeRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "workspace")
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	backupDir := filepath.Join(worktreeRoot, ".modu", "backups")
+	oldBackup := filepath.Join(backupDir, "20260401-010203_old-feature.tar.gz")
+	recentBackup := filepath.Join(backupDir, "20260514-010203_recent-feature.tar.gz")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatalf("创建 workspace 失败: %v", err)
+	}
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		t.Fatalf("创建 backup dir 失败: %v", err)
+	}
+	if err := os.WriteFile(oldBackup, []byte("old"), 0644); err != nil {
+		t.Fatalf("写入 old backup 失败: %v", err)
+	}
+	if err := os.WriteFile(recentBackup, []byte("recent"), 0644); err != nil {
+		t.Fatalf("写入 recent backup 失败: %v", err)
+	}
+	oldTime := time.Now().AddDate(0, 0, -31)
+	if err := os.Chtimes(oldBackup, oldTime, oldTime); err != nil {
+		t.Fatalf("设置 old backup 时间失败: %v", err)
+	}
+
+	configPath := filepath.Join(tmpDir, ".modu.yaml")
+	cfg := config.DefaultConfig()
+	cfg.Workspace = workspace
+	cfg.WorktreeRoot = worktreeRoot
+	cfg.Modules = []config.Module{{Name: "module1", URL: "git@example.com:module1.git"}}
+	if err := config.SaveConfig(cfg, configPath); err != nil {
+		t.Fatalf("保存配置失败: %v", err)
+	}
+
+	oldRunTUI := runTUI
+	runStarted := false
+	runTUI = func(cfg *config.Config) error {
+		runStarted = true
+		if _, err := os.Stat(oldBackup); !os.IsNotExist(err) {
+			t.Fatalf("TUI 启动前应已清理过期备份, stat err=%v", err)
+		}
+		if _, err := os.Stat(recentBackup); err != nil {
+			t.Fatalf("TUI 启动前不应清理近期备份: %v", err)
+		}
+		return nil
+	}
+	defer func() {
+		runTUI = oldRunTUI
+	}()
+
+	if err := StartTUI(configPath); err != nil {
+		t.Fatalf("StartTUI failed: %v", err)
+	}
+	if !runStarted {
+		t.Fatal("expected TUI run to start")
 	}
 }
 

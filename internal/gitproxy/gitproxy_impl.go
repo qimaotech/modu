@@ -106,15 +106,15 @@ func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktr
 	branchToDelete := ""
 	if err != nil {
 		logger.Warn("无法读取 worktree 分支状态，跳过删除分支: path=%s, err=%v", worktreePath, err)
-		fmt.Printf("Warning: skip branch delete (cannot read status): %s\n", worktreePath)
+		fmt.Fprintf(os.Stderr, "Warning: skip branch delete (cannot read status): %s\n", worktreePath)
 	} else {
 		b := strings.TrimSpace(status.Branch)
 		if b == "" || b == "HEAD" {
 			logger.Warn("worktree 无有效分支名（detached HEAD 等），跳过删除分支: path=%s", worktreePath)
-			fmt.Printf("Warning: skip branch delete (detached or unknown HEAD): %s\n", worktreePath)
+			fmt.Fprintf(os.Stderr, "Warning: skip branch delete (detached or unknown HEAD): %s\n", worktreePath)
 		} else if branchToFeatureDirSlug(b) != featureDirName {
 			logger.Warn("当前分支 %s（slug=%s）与 feature 目录名 %s 不一致，跳过删除分支", b, branchToFeatureDirSlug(b), featureDirName)
-			fmt.Printf("Warning: skip branch delete: branch %q slug does not match feature dir %q\n", b, featureDirName)
+			fmt.Fprintf(os.Stderr, "Warning: skip branch delete: branch %q slug does not match feature dir %q\n", b, featureDirName)
 		} else {
 			branchToDelete = b
 		}
@@ -148,7 +148,7 @@ func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktr
 		out, err = cmd.CombinedOutput()
 		if err != nil {
 			logger.Warn("删除分支失败（可能不存在）: branch=%s, error=%s", branchToDelete, string(out))
-			fmt.Printf("Warning: failed to delete branch %s: %s\n", branchToDelete, string(out))
+			fmt.Fprintf(os.Stderr, "Warning: failed to delete branch %s: %s\n", branchToDelete, string(out))
 		} else {
 			logger.Info("删除分支成功: %s", branchToDelete)
 		}

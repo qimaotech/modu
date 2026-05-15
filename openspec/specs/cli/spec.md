@@ -2,9 +2,9 @@
 
 **版本**: 2.4 | **来源**: docs/plans/2026-03-06-modu-design-v2.4.md + 代码提交
 
-## 目的
+## Purpose
 
-定义 modu 所有 CLI 子命令、参数及行为约定。
+定义 modu 所有 CLI 子命令、参数、输出格式和命令启动行为约定，确保命令入口在脚本与交互使用中保持一致。
 
 ## 入口
 
@@ -36,6 +36,36 @@
 
 - 子命令存在时始终走 CLI，不走 TUI。
 - JSON 输出（`-o json`）时，成功/失败结构需符合 [errors 规范](./../errors/spec.md) 中的机器输出协议。
+## Requirements
+### Requirement: CLI runs delete backup cleanup after config load
+CLI commands that successfully load an existing `.modu.yaml` via normal or scan config loading SHALL invoke delete backup cleanup once before executing their main command behavior. Cleanup failure SHALL be reported as a warning on stderr and MUST NOT block the requested command or corrupt JSON stdout.
+
+#### Scenario: Configured command starts
+- **WHEN** `modu create`, `modu delete`, `modu default-select`, `modu list`, `modu info`, `modu status`, `modu update`, `modu init`, or `modu config scan` successfully loads existing configuration
+- **THEN** the command invokes delete backup cleanup once before its main behavior
+
+#### Scenario: Cleanup warning does not block command
+- **WHEN** startup cleanup fails after configuration loading succeeds
+- **THEN** the CLI prints a warning to stderr and continues with the requested command
+
+#### Scenario: Cleanup warning preserves JSON stdout
+- **WHEN** startup cleanup fails and the requested command uses `-o json`
+- **THEN** the cleanup warning is not written to stdout
+
+#### Scenario: Command without existing config load does not clean
+- **WHEN** `modu version`, help output, or `modu config create` runs without loading an existing config
+- **THEN** delete backup cleanup is not required to run
+
+### Requirement: CLI delete exposes backup path
+`modu delete <feature>` SHALL report the created backup archive path when deletion succeeds.
+
+#### Scenario: Text delete output includes backup path
+- **WHEN** `modu delete my-feature` succeeds with text output
+- **THEN** the output includes the feature name and backup archive path
+
+#### Scenario: JSON delete output includes backup path
+- **WHEN** `modu delete my-feature -o json` succeeds
+- **THEN** the JSON response includes `backupPath`
 
 ## 与代码的对应
 

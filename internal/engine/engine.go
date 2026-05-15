@@ -1,13 +1,20 @@
 package engine
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -32,6 +39,12 @@ type MainProjectStatus struct {
 	Branch  string
 }
 
+// DeleteResult 描述删除 feature 工作树后的结果。
+type DeleteResult struct {
+	Feature    string
+	BackupPath string
+}
+
 // worktreeResult 创建工作树的结果
 type worktreeResult struct {
 	module   config.Module
@@ -41,6 +54,17 @@ type worktreeResult struct {
 	skipped  bool   // 是否跳过
 	skipMsg  string // 跳过原因
 }
+
+const (
+	defaultDeleteBackupRetentionDays = 30
+	deleteBackupTimeLayout           = "20060102-150405"
+)
+
+var (
+	deleteBackupNow              = time.Now
+	deleteBackupAfterTempCreated = func() {}
+	generatedDeleteBackupNameReg = regexp.MustCompile(`^\d{8}-\d{6}_.+\.tar\.gz$`)
+)
 
 // New 创建引擎
 func New(cfg *config.Config) *Engine {
@@ -433,28 +457,44 @@ func (e *Engine) CheckDirty(ctx context.Context, env core.WorktreeEnv) ([]core.M
 	return dirty, nil
 }
 
-// DeleteWorktree 删除 feature 工作树
-func (e *Engine) DeleteWorktree(ctx context.Context, feature string, force bool) error {
+// DeleteWorktree 删除 feature 工作树，并在删除前创建内容备份。
+func (e *Engine) DeleteWorktree(ctx context.Context, feature string, force bool) (*DeleteResult, error) {
 	logger.Info("开始删除 feature: %s, force: %v", feature, force)
 
 	// 将 feature 名转换为目录名（feature/hello → feature-hello）
-	dirName := featureToDirName(feature)
-	featurePath := filepath.Join(e.Config.WorktreeRoot, dirName)
+	dirName, featurePath, err := e.resolveDeleteFeaturePath(feature)
+	if err != nil {
+		return nil, err
+	}
 
 	// 检查是否存在
 	if _, err := os.Stat(featurePath); os.IsNotExist(err) {
-		return fmt.Errorf("feature %s not found: %w", feature, errs.ErrFeatureNotFound)
+		return nil, fmt.Errorf("feature %s not found: %w", feature, errs.ErrFeatureNotFound)
 	}
 
 	// 脏检查
 	if !force && e.Config.StrictDirty {
+		mainStatus, err := e.GitProxy.GetStatus(ctx, featurePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get status for main project %s: %w", featurePath, err)
+		}
+		if mainStatus.IsDirty {
+			dirty := []core.ModuleStatus{{
+				Name:    feature,
+				Path:    featurePath,
+				IsDirty: true,
+				Branch:  mainStatus.Branch,
+			}}
+			return nil, fmt.Errorf("cannot delete: uncommitted changes detected in %v: %w", dirty, errs.ErrDirtyWorktree)
+		}
+
 		env := core.WorktreeEnv{
 			Name: feature,
 		}
 		// 遍历 feature 目录下的所有模块
 		entries, err := os.ReadDir(featurePath)
 		if err != nil {
-			return fmt.Errorf("failed to read feature directory: %w", err)
+			return nil, fmt.Errorf("failed to read feature directory: %w", err)
 		}
 		configuredNames := e.configuredModuleNames()
 		for _, entry := range entries {
@@ -470,17 +510,25 @@ func (e *Engine) DeleteWorktree(ctx context.Context, feature string, force bool)
 
 		dirty, err := e.CheckDirty(ctx, env)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if len(dirty) > 0 {
-			return fmt.Errorf("cannot delete: uncommitted changes detected in %v: %w", dirty, errs.ErrDirtyWorktree)
+			return nil, fmt.Errorf("cannot delete: uncommitted changes detected in %v: %w", dirty, errs.ErrDirtyWorktree)
 		}
+	}
+
+	backupPath, err := e.createDeleteBackup(ctx, feature, featurePath)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("delete canceled after backup creation: %w", err)
 	}
 
 	// 获取 feature 目录下实际存在的模块
 	entries, err := os.ReadDir(featurePath)
 	if err != nil {
-		return fmt.Errorf("failed to read feature directory: %w", err)
+		return nil, fmt.Errorf("failed to read feature directory: %w", err)
 	}
 
 	// 删除所有存在的模块的 worktree
@@ -536,7 +584,7 @@ func (e *Engine) DeleteWorktree(ctx context.Context, feature string, force bool)
 		logger.Info("删除主项目 worktree: repo=%s, featureDir=%s, path=%s", e.Config.Workspace, dirName, mainProjectPath)
 		if err := e.GitProxy.RemoveWorktreeAndBranch(ctx, e.Config.Workspace, mainProjectPath, dirName); err != nil {
 			logger.Error("删除主项目 worktree 失败: error=%v", err)
-			fmt.Printf("Warning: failed to remove main project worktree: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to remove main project worktree: %v\n", err)
 		} else {
 			logger.Info("删除主项目 worktree 成功")
 		}
@@ -545,11 +593,259 @@ func (e *Engine) DeleteWorktree(ctx context.Context, feature string, force bool)
 	// 删除 feature 目录
 	if err := os.RemoveAll(featurePath); err != nil {
 		logger.Error("删除 feature 目录失败: %s, error: %v", feature, err)
-		return fmt.Errorf("failed to remove feature directory: %w", err)
+		return nil, fmt.Errorf("failed to remove feature directory: %w", err)
 	}
 
 	logger.Info("成功删除 feature: %s", feature)
+	return &DeleteResult{
+		Feature:    feature,
+		BackupPath: backupPath,
+	}, nil
+}
+
+// resolveDeleteFeaturePath 返回待删除 feature 的安全目录路径。
+func (e *Engine) resolveDeleteFeaturePath(feature string) (string, string, error) {
+	dirName := featureToDirName(feature)
+	if !isSafeDeleteFeatureDirName(dirName) {
+		return "", "", fmt.Errorf("invalid feature directory %q: %w", dirName, errs.ErrInvalidOperation)
+	}
+
+	worktreeRootAbs, err := filepath.Abs(e.Config.WorktreeRoot)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve worktree root: %w", err)
+	}
+	featurePathAbs, err := filepath.Abs(filepath.Join(worktreeRootAbs, dirName))
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve feature path: %w", err)
+	}
+	rel, err := filepath.Rel(worktreeRootAbs, featurePathAbs)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to validate feature path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || strings.Contains(rel, string(os.PathSeparator)) {
+		return "", "", fmt.Errorf("feature path %s is outside worktree root: %w", featurePathAbs, errs.ErrInvalidOperation)
+	}
+	return dirName, featurePathAbs, nil
+}
+
+func isSafeDeleteFeatureDirName(dirName string) bool {
+	if dirName == "" || dirName == "." || dirName == ".." {
+		return false
+	}
+	if filepath.IsAbs(dirName) || strings.HasPrefix(dirName, ".") {
+		return false
+	}
+	return !strings.Contains(dirName, string(os.PathSeparator))
+}
+
+// createDeleteBackup 将 feature 目录打包为 tar.gz 内容备份。
+func (e *Engine) createDeleteBackup(ctx context.Context, feature, featurePath string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("delete backup canceled: %w", err)
+	}
+
+	backupDir := e.deleteBackupDir()
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create delete backup directory: %w", err)
+	}
+
+	tmpFile, err := os.CreateTemp(backupDir, ".tmp-delete-backup-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create delete backup temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	deleteBackupAfterTempCreated()
+
+	if err := writeTarGzArchive(ctx, tmpFile, featureToDirName(feature), featurePath); err != nil {
+		_ = tmpFile.Close()
+		return "", err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return "", fmt.Errorf("failed to close delete backup temp file: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("delete backup canceled: %w", err)
+	}
+	for i := 0; ; i++ {
+		if err := ctx.Err(); err != nil {
+			return "", fmt.Errorf("delete backup canceled: %w", err)
+		}
+		finalPath := e.deleteBackupPath(feature, i)
+		if err := os.Link(tmpPath, finalPath); err == nil {
+			return finalPath, nil
+		} else if !errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf("failed to finalize delete backup: %w", err)
+		}
+	}
+}
+
+// CleanupDeleteBackups 清理超过保留期的 delete 备份。
+func (e *Engine) CleanupDeleteBackups(ctx context.Context) error {
+	backupDir := e.deleteBackupDir()
+	entries, err := os.ReadDir(backupDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read delete backup directory: %w", err)
+	}
+
+	cutoff := deleteBackupNow().Add(-time.Duration(e.deleteBackupRetentionDays()) * 24 * time.Hour)
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("delete backup cleanup canceled: %w", err)
+		}
+		if entry.IsDir() || !generatedDeleteBackupNameReg.MatchString(entry.Name()) {
+			continue
+		}
+		path := filepath.Join(backupDir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("failed to read delete backup info for %s: %w", path, err)
+		}
+		if !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("failed to remove expired delete backup %s: %w", path, err)
+		}
+	}
 	return nil
+}
+
+// deleteBackupDir 返回固定 delete 备份目录。
+func (e *Engine) deleteBackupDir() string {
+	return filepath.Join(e.Config.WorktreeRoot, ".modu", "backups")
+}
+
+// deleteBackupRetentionDays 返回 delete 备份保留天数。
+func (e *Engine) deleteBackupRetentionDays() int {
+	if e.Config.DeleteBackup.RetentionDays > 0 {
+		return e.Config.DeleteBackup.RetentionDays
+	}
+	return defaultDeleteBackupRetentionDays
+}
+
+// deleteBackupPath 生成指定序号的备份路径。
+func (e *Engine) deleteBackupPath(feature string, suffix int) string {
+	dirName := featureToDirName(feature)
+	timestamp := deleteBackupNow().Format(deleteBackupTimeLayout)
+	backupDir := e.deleteBackupDir()
+	if suffix == 0 {
+		return filepath.Join(backupDir, fmt.Sprintf("%s_%s.tar.gz", timestamp, dirName))
+	}
+	return filepath.Join(backupDir, fmt.Sprintf("%s_%s-%d.tar.gz", timestamp, dirName, suffix))
+}
+
+// writeTarGzArchive 写入 feature 目录的 tar.gz 归档。
+func writeTarGzArchive(ctx context.Context, output io.Writer, rootName, sourcePath string) error {
+	gzipWriter := gzip.NewWriter(output)
+	tarWriter := tar.NewWriter(gzipWriter)
+
+	err := filepath.WalkDir(sourcePath, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("failed to read file info for %s: %w", path, err)
+		}
+
+		linkTarget := ""
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, err = os.Readlink(path)
+			if err != nil {
+				return fmt.Errorf("failed to read symlink %s: %w", path, err)
+			}
+		}
+		header, err := tar.FileInfoHeader(info, linkTarget)
+		if err != nil {
+			return fmt.Errorf("failed to create tar header for %s: %w", path, err)
+		}
+		header.Name = archiveEntryName(rootName, sourcePath, path, info.IsDir())
+
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return fmt.Errorf("failed to write tar header for %s: %w", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+
+		file, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("failed to open %s for backup: %w", path, err)
+		}
+		copyErr := copyWithContext(ctx, tarWriter, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return fmt.Errorf("failed to write %s to backup: %w", path, copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("failed to close %s during backup: %w", path, closeErr)
+		}
+		return nil
+	})
+	if err != nil {
+		_ = tarWriter.Close()
+		_ = gzipWriter.Close()
+		return fmt.Errorf("failed to create delete backup archive: %w", err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		_ = gzipWriter.Close()
+		return fmt.Errorf("failed to close delete backup tar writer: %w", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		return fmt.Errorf("failed to close delete backup gzip writer: %w", err)
+	}
+	return nil
+}
+
+// archiveEntryName 生成稳定的归档内路径。
+func archiveEntryName(rootName, sourcePath, path string, isDir bool) string {
+	rel, err := filepath.Rel(sourcePath, path)
+	if err != nil || rel == "." {
+		if isDir {
+			return filepath.ToSlash(rootName) + "/"
+		}
+		return filepath.ToSlash(rootName)
+	}
+	name := filepath.ToSlash(filepath.Join(rootName, rel))
+	if isDir {
+		return name + "/"
+	}
+	return name
+}
+
+// copyWithContext 在复制大文件时响应取消。
+func copyWithContext(ctx context.Context, writer io.Writer, reader io.Reader) error {
+	buffer := make([]byte, 32*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, readErr := reader.Read(buffer)
+		if n > 0 {
+			if _, writeErr := writer.Write(buffer[:n]); writeErr != nil {
+				return writeErr
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 // GetMainProject 获取主项目（workspace）状态，若路径无效或非 git 仓库则返回 nil 与 nil error

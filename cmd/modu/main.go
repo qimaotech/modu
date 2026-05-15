@@ -220,7 +220,7 @@ func main() {
 	}
 }
 
-func loadConfig() *engine.Engine {
+func loadConfig(ctx context.Context) *engine.Engine {
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		// 检查配置文件是否存在
@@ -261,7 +261,15 @@ func loadConfig() *engine.Engine {
 		cfg.DefaultSelectedModules = extCfg.DefaultSelectedModules
 	}
 
-	return engine.New(cfg)
+	eng := engine.New(cfg)
+	cleanupDeleteBackups(ctx, eng)
+	return eng
+}
+
+func cleanupDeleteBackups(ctx context.Context, eng *engine.Engine) {
+	if err := eng.CleanupDeleteBackups(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "警告: 清理过期备份失败: %v\n", err)
+	}
 }
 
 func runCreate(cmd *cobra.Command, args []string) {
@@ -269,7 +277,7 @@ func runCreate(cmd *cobra.Command, args []string) {
 	base, _ := cmd.Flags().GetString("base")
 	modules, _ := cmd.Flags().GetStringSlice("modules")
 
-	eng := loadConfig()
+	eng := loadConfig(cmd.Context())
 
 	// 检查 feature 是否已存在
 	featurePath := filepath.Join(eng.Config.WorktreeRoot, feature)
@@ -408,20 +416,24 @@ func runDelete(cmd *cobra.Command, args []string) {
 	feature := args[0]
 	force, _ := cmd.Flags().GetBool("force")
 
-	eng := loadConfig()
+	eng := loadConfig(cmd.Context())
 	formatter := output.New(outputFmt)
 
-	err := eng.DeleteWorktree(cmd.Context(), feature, force)
+	result, err := eng.DeleteWorktree(cmd.Context(), feature, force)
 	if err != nil {
 		fmt.Print(formatter.FormatError(errors.Code(err), err.Error(), nil))
 		os.Exit(1)
 	}
 
-	fmt.Print(formatter.FormatDeleteResponse(feature, nil))
+	backupPath := ""
+	if result != nil {
+		backupPath = result.BackupPath
+	}
+	fmt.Print(formatter.FormatDeleteResponse(feature, nil, backupPath))
 }
 
 func runList(cmd *cobra.Command, args []string) {
-	eng := loadConfig()
+	eng := loadConfig(cmd.Context())
 	formatter := output.New(outputFmt)
 	showStatus, _ := cmd.Flags().GetBool("status")
 	showAll, _ := cmd.Flags().GetBool("all")
@@ -445,7 +457,7 @@ func runList(cmd *cobra.Command, args []string) {
 }
 
 func runInfo(cmd *cobra.Command, args []string) {
-	eng := loadConfig()
+	eng := loadConfig(cmd.Context())
 	formatter := output.New(outputFmt)
 
 	var feature string
@@ -504,6 +516,7 @@ func inferCurrentFeature(cwd, worktreeRoot string) string {
 
 func runInit(cmd *cobra.Command, args []string) {
 	shouldScan, _ := cmd.Flags().GetBool("scan")
+	cleanupRan := false
 
 	// 检查配置文件是否存在
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
@@ -518,6 +531,7 @@ func runInit(cmd *cobra.Command, args []string) {
 				os.Exit(1)
 			}
 			runConfigScan(cmd, []string{})
+			cleanupRan = true
 		}
 
 		// 再次检查配置文件是否存在（扫描后可能已创建）
@@ -590,10 +604,11 @@ func runInit(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	if shouldScan && len(cfg.Modules) == 0 {
+	if shouldScan && len(cfg.Modules) == 0 && !cleanupRan {
 		fmt.Println()
 		fmt.Println("正在扫描目录自动发现模块...")
 		runConfigScan(cmd, []string{})
+		cleanupRan = true
 		// 重新加载配置
 		cfg, err = config.LoadConfigForScan(configPath)
 		if err != nil {
@@ -604,6 +619,9 @@ func runInit(cmd *cobra.Command, args []string) {
 
 	// 使用完整配置创建 Engine
 	eng := engine.New(cfg)
+	if !cleanupRan {
+		cleanupDeleteBackups(cmd.Context(), eng)
+	}
 	formatter := output.New(outputFmt)
 
 	err = eng.Init(cmd.Context())
@@ -636,7 +654,7 @@ func runVersion(cmd *cobra.Command, args []string) {
 }
 
 func runStatus(cmd *cobra.Command, args []string) {
-	eng := loadConfig()
+	eng := loadConfig(cmd.Context())
 	formatter := output.New(outputFmt)
 
 	envs, err := eng.ListWorktrees(cmd.Context())
@@ -649,7 +667,7 @@ func runStatus(cmd *cobra.Command, args []string) {
 }
 
 func runUpdate(cmd *cobra.Command, args []string) {
-	eng := loadConfig()
+	eng := loadConfig(cmd.Context())
 
 	if len(args) == 0 {
 		success, failed := eng.UpdateMainProject(cmd.Context())
@@ -695,7 +713,7 @@ func printUpdateResult(feature string, success int, failed map[string]error) {
 
 // runDefaultSelect 设置默认选中的模块
 func runDefaultSelect(cmd *cobra.Command, args []string) {
-	eng := loadConfig()
+	eng := loadConfig(cmd.Context())
 
 	// 如果没有模块，提示用户先配置
 	if len(eng.Config.Modules) == 0 {
@@ -808,6 +826,7 @@ func runConfigScan(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
 		os.Exit(1)
 	}
+	cleanupDeleteBackups(cmd.Context(), engine.New(cfg))
 
 	// 扫描当前目录
 	currentDir, err := os.Getwd()

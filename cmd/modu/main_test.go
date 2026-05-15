@@ -1,10 +1,16 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/qimaotech/modu/internal/config"
+	"github.com/qimaotech/modu/internal/engine"
 )
 
 func TestIsInteractiveTerminal(t *testing.T) {
@@ -309,4 +315,51 @@ func TestInferCurrentFeature(t *testing.T) {
 			t.Errorf("expected 'feature1', got '%s'", result)
 		}
 	})
+}
+
+func TestCleanupDeleteBackups_WritesWarningToStderr(t *testing.T) {
+	tmpDir := t.TempDir()
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	if err := os.MkdirAll(worktreeRoot, 0755); err != nil {
+		t.Fatalf("failed to create worktree root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeRoot, ".modu"), []byte("not a directory"), 0644); err != nil {
+		t.Fatalf("failed to write .modu file: %v", err)
+	}
+	eng := engine.New(&config.Config{WorktreeRoot: worktreeRoot})
+
+	oldStderr := os.Stderr
+	stderrRead, stderrWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create stderr pipe: %v", err)
+	}
+	oldStdout := os.Stdout
+	stdoutRead, stdoutWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create stdout pipe: %v", err)
+	}
+	os.Stderr = stderrWrite
+	os.Stdout = stdoutWrite
+	defer func() {
+		os.Stderr = oldStderr
+		os.Stdout = oldStdout
+	}()
+	cleanupDeleteBackups(context.Background(), eng)
+	_ = stderrWrite.Close()
+	_ = stdoutWrite.Close()
+
+	data, err := io.ReadAll(stderrRead)
+	if err != nil {
+		t.Fatalf("failed to read stderr: %v", err)
+	}
+	if !strings.Contains(string(data), "警告: 清理过期备份失败") {
+		t.Fatalf("expected cleanup warning on stderr, got %q", string(data))
+	}
+	stdoutData, err := io.ReadAll(stdoutRead)
+	if err != nil {
+		t.Fatalf("failed to read stdout: %v", err)
+	}
+	if string(stdoutData) != "" {
+		t.Fatalf("expected empty stdout, got %q", string(stdoutData))
+	}
 }

@@ -38,6 +38,8 @@ default-base: develop
 concurrency: 5
 auto-fetch: true
 strict-dirty-check: true
+delete-backup:
+  retention-days: 30
 
 modules:
   - name: frontend
@@ -62,6 +64,7 @@ app-openers:
 | `concurrency`            | 否   | 并发数，默认 5            |
 | `auto-fetch`             | 否   | 操作前自动 fetch          |
 | `strict-dirty-check`     | 否   | 删除前强制脏检查          |
+| `delete-backup.retention-days` | 否   | delete 备份保留天数，默认 30；省略或配置为 0 时使用默认值 |
 | `default-selected-modules` | 否   | 创建 feature 时默认选中的模块列表（可通过 `modu default-select` 命令配置） |
 | `app-openers`           | 否   | TUI 操作菜单中的自定义打开工具 |
 | `modules`               | 是   | 模块列表                  |
@@ -139,6 +142,7 @@ modu info my-feature
 # 删除 worktree
 modu delete my-feature
 modu delete my-feature --force  # 强制删除（跳过脏检查）
+# 删除成功前会先写入 <worktree-root>/.modu/backups/*.tar.gz，并在输出中显示“备份文件”
 
 # 设置默认选中的模块（创建 feature 时会默认选中这些模块）
 modu default-select

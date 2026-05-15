@@ -2,9 +2,9 @@
 
 **版本**: 2.4 | **来源**: docs/plans/2026-03-06-modu-design-v2.4.md + 代码
 
-## 目的
+## Purpose
 
-结构化输出（表格 / JSON），供 CLI 与 `-o json` 使用。
+定义 CLI 文本输出与 JSON 结构化输出规则，确保人类可读提示和机器可解析响应在成功、失败及删除备份场景中保持稳定。
 
 ## 输出格式
 
@@ -27,6 +27,17 @@ text 格式下，面向用户的成功/失败提示 SHALL 使用中文。删除�
 | 错误明细行 | 错误: %s |
 
 JSON 格式中 `action` 等字段保持英文（如 `"delete"`），仅 text 输出本地化。
+## Requirements
+### Requirement: Delete response includes backup path
+Delete responses SHALL include the backup archive path produced by the engine when deletion succeeds. Text output SHALL display the backup path in Chinese user-facing copy, and JSON output SHALL include a `backupPath` field.
+
+#### Scenario: Text delete response
+- **WHEN** formatting a successful delete response with backup path `/worktrees/.modu/backups/20260515-153012_my-feature.tar.gz`
+- **THEN** text output includes `备份文件: /worktrees/.modu/backups/20260515-153012_my-feature.tar.gz`
+
+#### Scenario: JSON delete response
+- **WHEN** formatting a successful delete response with backup path `/worktrees/.modu/backups/20260515-153012_my-feature.tar.gz`
+- **THEN** JSON output includes `"backupPath": "/worktrees/.modu/backups/20260515-153012_my-feature.tar.gz"`
 
 ## 与代码的对应
 

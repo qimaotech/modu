@@ -15,17 +15,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const defaultDeleteBackupRetentionDays = 30
+
 // Config modu 配置文件结构
 type Config struct {
-	Workspace              string      `yaml:"workspace"`                // 裸仓库/主仓库所在目录
-	WorktreeRoot           string      `yaml:"worktree-root"`            // 特性分支代码存放目录
-	DefaultBase            string      `yaml:"default-base"`             // 默认基准分支 (如 develop)
-	Concurrency            int         `yaml:"concurrency"`              // 并发数，默认 5
-	AutoFetch              bool        `yaml:"auto-fetch"`               // 操作前自动 fetch
-	StrictDirty            bool        `yaml:"strict-dirty-check"`       // 删除前强制脏检查
-	Modules                []Module    `yaml:"modules"`                  // 模块列表
-	DefaultSelectedModules []string    `yaml:"default-selected-modules"` // 创建时默认选中的模块列表
-	AppOpeners             []AppOpener `yaml:"app-openers,omitempty"`    // TUI 操作菜单额外打开工具
+	Workspace              string             `yaml:"workspace"`                // 裸仓库/主仓库所在目录
+	WorktreeRoot           string             `yaml:"worktree-root"`            // 特性分支代码存放目录
+	DefaultBase            string             `yaml:"default-base"`             // 默认基准分支 (如 develop)
+	Concurrency            int                `yaml:"concurrency"`              // 并发数，默认 5
+	AutoFetch              bool               `yaml:"auto-fetch"`               // 操作前自动 fetch
+	StrictDirty            bool               `yaml:"strict-dirty-check"`       // 删除前强制脏检查
+	DeleteBackup           DeleteBackupConfig `yaml:"delete-backup"`            // delete 备份保留配置
+	Modules                []Module           `yaml:"modules"`                  // 模块列表
+	DefaultSelectedModules []string           `yaml:"default-selected-modules"` // 创建时默认选中的模块列表
+	AppOpeners             []AppOpener        `yaml:"app-openers,omitempty"`    // TUI 操作菜单额外打开工具
 }
 
 // IsConfigNotFoundError 检查是否为配置文件不存在错误
@@ -56,6 +59,11 @@ type AppOpener struct {
 	Shortcut string `yaml:"shortcut,omitempty"` // 可选单字符快捷键
 }
 
+// DeleteBackupConfig delete 备份相关配置。
+type DeleteBackupConfig struct {
+	RetentionDays int `yaml:"retention-days"` // 删除备份保留天数，默认 30
+}
+
 // LoadConfig 加载并校验配置文件
 func LoadConfig(path string) (*Config, error) {
 	cfg, err := loadConfigImpl(path)
@@ -65,10 +73,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err := validate(cfg); err != nil {
 		return nil, err
 	}
-	// 设置默认值
-	if cfg.Concurrency == 0 {
-		cfg.Concurrency = 5
-	}
+	applyDefaults(cfg)
 	return cfg, nil
 }
 
@@ -82,10 +87,7 @@ func LoadConfigForScan(path string) (*Config, error) {
 	if err := validateBasic(cfg); err != nil {
 		return nil, err
 	}
-	// 设置默认值
-	if cfg.Concurrency == 0 {
-		cfg.Concurrency = 5
-	}
+	applyDefaults(cfg)
 	return cfg, nil
 }
 
@@ -180,6 +182,7 @@ func validate(cfg *Config) error {
 	if len(cfg.Modules) == 0 {
 		validationErrs = append(validationErrs, fmt.Errorf("%w: at least one module is required", errs.ErrConfigInvalid))
 	}
+	validationErrs = append(validationErrs, validateDeleteBackup(cfg)...)
 	validationErrs = append(validationErrs, validateAppOpeners(cfg)...)
 	return errors.Join(validationErrs...)
 }
@@ -196,8 +199,27 @@ func validateBasic(cfg *Config) error {
 	if cfg.DefaultBase == "" {
 		validationErrs = append(validationErrs, fmt.Errorf("%w: default-base is required", errs.ErrConfigInvalid))
 	}
+	validationErrs = append(validationErrs, validateDeleteBackup(cfg)...)
 	validationErrs = append(validationErrs, validateAppOpeners(cfg)...)
 	return errors.Join(validationErrs...)
+}
+
+// applyDefaults 填充未显式配置的默认值。
+func applyDefaults(cfg *Config) {
+	if cfg.Concurrency == 0 {
+		cfg.Concurrency = 5
+	}
+	if cfg.DeleteBackup.RetentionDays == 0 {
+		cfg.DeleteBackup.RetentionDays = defaultDeleteBackupRetentionDays
+	}
+}
+
+// validateDeleteBackup 校验 delete 备份配置。
+func validateDeleteBackup(cfg *Config) []error {
+	if cfg.DeleteBackup.RetentionDays >= 0 {
+		return nil
+	}
+	return []error{fmt.Errorf("%w: delete-backup.retention-days must be greater than or equal to 0", errs.ErrConfigInvalid)}
 }
 
 func validateAppOpeners(cfg *Config) []error {
@@ -235,6 +257,7 @@ func DefaultConfig() *Config {
 		Concurrency:  5,
 		AutoFetch:    true,
 		StrictDirty:  true,
+		DeleteBackup: DeleteBackupConfig{RetentionDays: defaultDeleteBackupRetentionDays},
 		Modules:      []Module{},
 	}
 }
