@@ -99,6 +99,26 @@ func main() {
 	}
 	deleteCmd.Flags().BoolP("force", "f", false, "强制删除（跳过脏检查）")
 
+	// backup 命令
+	backupCmd := &cobra.Command{
+		Use:   "backup",
+		Short: "管理删除备份",
+	}
+	backupListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "列出可恢复的删除备份",
+		Run:   runBackupList,
+	}
+	backupRestoreCmd := &cobra.Command{
+		Use:   "restore <backup>",
+		Short: "恢复删除备份",
+		Args:  cobra.ExactArgs(1),
+		Run:   runBackupRestore,
+	}
+	backupRestoreCmd.Flags().String("feature", "", "恢复到指定 feature，默认使用备份中的 feature 目录名")
+	backupRestoreCmd.Flags().String("base", "", "恢复时创建 worktree 使用的基准分支，默认使用配置 default-base")
+	backupCmd.AddCommand(backupListCmd, backupRestoreCmd)
+
 	// default-select 命令 - 设置默认选中的模块
 	defaultSelectCmd := &cobra.Command{
 		Use:   "default-select",
@@ -212,7 +232,7 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(createCmd, deleteCmd, defaultSelectCmd, listCmd, infoCmd, configCmd, initCmd, statusCmd, updateCmd, tuiCmd, versionCmd)
+	rootCmd.AddCommand(createCmd, deleteCmd, backupCmd, defaultSelectCmd, listCmd, infoCmd, configCmd, initCmd, statusCmd, updateCmd, tuiCmd, versionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -221,6 +241,14 @@ func main() {
 }
 
 func loadConfig(ctx context.Context) *engine.Engine {
+	return loadConfigWithCleanup(ctx, true)
+}
+
+func loadConfigForBackup(ctx context.Context) *engine.Engine {
+	return loadConfigWithCleanup(ctx, false)
+}
+
+func loadConfigWithCleanup(ctx context.Context, shouldCleanup bool) *engine.Engine {
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		// 检查配置文件是否存在
@@ -262,7 +290,9 @@ func loadConfig(ctx context.Context) *engine.Engine {
 	}
 
 	eng := engine.New(cfg)
-	cleanupDeleteBackups(ctx, eng)
+	if shouldCleanup {
+		cleanupDeleteBackups(ctx, eng)
+	}
 	return eng
 }
 
@@ -430,6 +460,38 @@ func runDelete(cmd *cobra.Command, args []string) {
 		backupPath = result.BackupPath
 	}
 	fmt.Print(formatter.FormatDeleteResponse(feature, nil, backupPath))
+}
+
+func runBackupList(cmd *cobra.Command, args []string) {
+	eng := loadConfigForBackup(cmd.Context())
+	formatter := output.New(outputFmt)
+
+	backups, err := eng.ListDeleteBackups(cmd.Context())
+	if err != nil {
+		fmt.Print(formatter.FormatError(errors.Code(err), err.Error(), nil))
+		os.Exit(1)
+	}
+	fmt.Print(formatter.FormatBackupListResponse(backups))
+}
+
+func runBackupRestore(cmd *cobra.Command, args []string) {
+	backupRef := args[0]
+	feature, _ := cmd.Flags().GetString("feature")
+	base, _ := cmd.Flags().GetString("base")
+
+	eng := loadConfigForBackup(cmd.Context())
+	formatter := output.New(outputFmt)
+
+	result, err := eng.RestoreDeleteBackup(cmd.Context(), engine.RestoreDeleteBackupOptions{
+		Backup:  backupRef,
+		Feature: feature,
+		Base:    base,
+	})
+	if err != nil {
+		fmt.Print(formatter.FormatError(errors.Code(err), err.Error(), nil))
+		os.Exit(1)
+	}
+	fmt.Print(formatter.FormatBackupRestoreResponse(result))
 }
 
 func runList(cmd *cobra.Command, args []string) {

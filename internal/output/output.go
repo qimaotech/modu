@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/qimaotech/modu/internal/core"
+	"github.com/qimaotech/modu/internal/engine"
 )
 
 // Result 单个模块的操作结果
@@ -33,6 +35,22 @@ type DeleteResponse struct {
 	BackupPath string   `json:"backupPath,omitempty"`
 	Results    []Result `json:"results"`
 	Errors     []string `json:"errors"`
+}
+
+// BackupListResponse delete 备份列表响应。
+type BackupListResponse struct {
+	Success bool                      `json:"success"`
+	Action  string                    `json:"action"`
+	Backups []engine.DeleteBackupInfo `json:"backups"`
+}
+
+// BackupRestoreResponse delete 备份恢复响应。
+type BackupRestoreResponse struct {
+	Success    bool   `json:"success"`
+	Action     string `json:"action"`
+	Feature    string `json:"feature"`
+	Path       string `json:"path"`
+	BackupPath string `json:"backupPath"`
 }
 
 // ErrorResponse 错误响应
@@ -154,6 +172,73 @@ func (f *Formatter) FormatDeleteResponse(feature string, errs []error, backupPat
 	return sb.String()
 }
 
+// FormatBackupListResponse 格式化 delete 备份列表响应。
+func (f *Formatter) FormatBackupListResponse(backups []engine.DeleteBackupInfo) string {
+	if f.format == "json" {
+		resp := BackupListResponse{
+			Success: true,
+			Action:  "backup-list",
+			Backups: backups,
+		}
+		data, err := json.MarshalIndent(resp, "", "  ")
+		if err != nil {
+			return `{"error": "failed to marshal response"}`
+		}
+		return string(data)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("备份列表:\n")
+	if len(backups) == 0 {
+		sb.WriteString("  无可恢复备份\n")
+		return sb.String()
+	}
+	for _, backup := range backups {
+		sb.WriteString(fmt.Sprintf("  - %s | %s | %s | %d bytes\n",
+			backup.ID,
+			backup.Feature,
+			formatBackupTime(backup.CreatedAt),
+			backup.SizeBytes,
+		))
+		sb.WriteString(fmt.Sprintf("    路径: %s\n", backup.Path))
+	}
+	return sb.String()
+}
+
+// FormatBackupRestoreResponse 格式化 delete 备份恢复响应。
+func (f *Formatter) FormatBackupRestoreResponse(result *engine.RestoreDeleteBackupResult) string {
+	if result == nil {
+		result = &engine.RestoreDeleteBackupResult{}
+	}
+	if f.format == "json" {
+		resp := BackupRestoreResponse{
+			Success:    true,
+			Action:     "backup-restore",
+			Feature:    result.Feature,
+			Path:       result.Path,
+			BackupPath: result.BackupPath,
+		}
+		data, err := json.MarshalIndent(resp, "", "  ")
+		if err != nil {
+			return `{"error": "failed to marshal response"}`
+		}
+		return string(data)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("✓ 已恢复备份: %s\n", result.Feature))
+	sb.WriteString(fmt.Sprintf("  目标路径: %s\n", result.Path))
+	sb.WriteString(fmt.Sprintf("  备份文件: %s\n", result.BackupPath))
+	return sb.String()
+}
+
+func formatBackupTime(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.Format("2006-01-02 15:04:05")
+}
+
 // FormatError 格式化错误响应
 func (f *Formatter) FormatError(code, message string, data interface{}) string {
 	if f.format == "json" {
@@ -188,7 +273,19 @@ func (f *Formatter) FormatListResponse(envs []core.WorktreeEnv, showStatus bool)
 	var sb strings.Builder
 	sb.WriteString("Features:\n")
 	for _, env := range envs {
-		sb.WriteString(fmt.Sprintf("  - %s[%s]\n", env.Name, env.MainProject.Path))
+		mainPath := ""
+		mainStatus := ""
+		if env.MainProject != nil {
+			mainPath = env.MainProject.Path
+			if showStatus {
+				status := "clean"
+				if env.MainProject.IsDirty {
+					status = "dirty"
+				}
+				mainStatus = fmt.Sprintf(" (main: %s)", status)
+			}
+		}
+		sb.WriteString(fmt.Sprintf("  - %s[%s]%s\n", env.Name, mainPath, mainStatus))
 
 		// 输出模块
 		for _, mod := range env.Modules {
@@ -256,6 +353,15 @@ func (f *Formatter) FormatInfoResponse(env *core.WorktreeEnv) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("🔖 Feature: %s\n", env.Name))
 	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	if env.MainProject != nil {
+		status := "✅ clean"
+		if env.MainProject.IsDirty {
+			status = "🔴 dirty"
+		}
+		sb.WriteString("🏠 Main Project:\n")
+		sb.WriteString(fmt.Sprintf("  🌿 Branch: %s  %s\n", env.MainProject.Branch, status))
+		sb.WriteString(fmt.Sprintf("  📁 Path: %s\n", env.MainProject.Path))
+	}
 	sb.WriteString("📦 Modules:\n")
 	for i, mod := range env.Modules {
 		status := "✅ clean"

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
@@ -127,6 +128,9 @@ func (e *FeatureEntry) IsMainProject() bool { return false }
 func (e *FeatureEntry) GetName() string     { return e.WorktreeEnv.Name }
 func (e *FeatureEntry) GetDirtyCount() int {
 	n := 0
+	if e.WorktreeEnv.MainProject != nil && e.WorktreeEnv.MainProject.IsDirty {
+		n++
+	}
 	for _, m := range e.WorktreeEnv.Modules {
 		if m.IsDirty {
 			n++
@@ -159,6 +163,10 @@ type App struct {
 	createFeatureCursor int    // feature 名称输入光标
 	createFeatureError  string // feature 名称输入校验提示
 	createFeature       string // 当前待创建的 feature 名称
+	// 删除备份恢复相关字段
+	restoreBackups       []engine.DeleteBackupInfo
+	restoreCursor        int
+	restoreBackupsLoaded bool
 }
 
 // New 创建 TUI App
@@ -205,6 +213,16 @@ type createFeatureDoneMsg struct {
 	err     error
 }
 
+type restoreBackupsLoadedMsg struct {
+	backups []engine.DeleteBackupInfo
+	err     error
+}
+
+type restoreBackupDoneMsg struct {
+	result *engine.RestoreDeleteBackupResult
+	err    error
+}
+
 type errorMsg struct {
 	err error
 }
@@ -246,6 +264,27 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resetCreateFeature()
 		m.state = "loading"
 		return m, m.loadEnvs
+	case restoreBackupsLoadedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.state = "error"
+			return m, nil
+		}
+		m.restoreBackups = msg.backups
+		m.restoreCursor = 0
+		m.restoreBackupsLoaded = true
+		m.state = "restore_backups"
+	case restoreBackupDoneMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.state = "error"
+			return m, nil
+		}
+		if msg.result != nil {
+			m.message = fmt.Sprintf("已恢复备份: %s\n目标路径: %s", msg.result.Feature, msg.result.Path)
+		}
+		m.state = "loading"
+		return m, m.loadEnvs
 	case errorMsg:
 		m.err = msg.err
 		m.state = "error"
@@ -261,6 +300,8 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleCreateInputKey(msg)
 		case "create_modules":
 			return m.handleCreateModulesKey(msg)
+		case "restore_backups":
+			return m.handleRestoreBackupsKey(msg)
 		case "confirm":
 			return m.handleConfirmKey(msg)
 		case "error":
@@ -353,6 +394,8 @@ func (m *App) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "n":
 		m.startCreateFeature()
+	case "r":
+		return m, m.startRestoreBackups()
 	case "q", "esc":
 		return m, tea.Quit
 	}
@@ -468,6 +511,7 @@ func (m *App) operationMenuItems() []operationMenuItem {
 		m.copyPathAndBack()
 		return nil
 	}})
+	items = append(items, operationMenuItem{label: "恢复备份", shortcut: "r", run: m.startRestoreBackups})
 
 	if m.isMainProjectMenu {
 		items = append(items, operationMenuItem{label: "更新代码", shortcut: "u", run: func() tea.Cmd {
@@ -535,6 +579,7 @@ func builtinMenuShortcuts() map[string]bool {
 		"u": true,
 		"m": true,
 		"d": true,
+		"r": true,
 		"q": true,
 	}
 }
@@ -579,24 +624,34 @@ func (m *App) openAppByName(appName string) {
 func (m *App) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "enter":
-		result, err := m.Engine.DeleteWorktree(context.Background(), m.feature, false)
-		if err != nil {
-			m.err = err
-			m.state = "error"
-		} else {
-			backupPath := ""
-			if result != nil {
-				backupPath = result.BackupPath
-			}
-			m.message = fmt.Sprintf("已删除 feature: %s\n备份文件: %s", m.feature, backupPath)
-			m.state = "loading"
-			m.selected = 0
-			return m, m.loadEnvs
-		}
+		return m.deleteConfirmed(false)
+	case "f":
+		return m.deleteConfirmed(true)
 	case "n", "esc":
 		m.state = "list"
 	}
 	return m, nil
+}
+
+func (m *App) deleteConfirmed(force bool) (tea.Model, tea.Cmd) {
+	result, err := m.Engine.DeleteWorktree(context.Background(), m.feature, force)
+	if err != nil {
+		m.err = err
+		m.state = "error"
+		return m, nil
+	}
+	backupPath := ""
+	if result != nil {
+		backupPath = result.BackupPath
+	}
+	if force {
+		m.message = fmt.Sprintf("已强制删除 feature: %s\n备份文件: %s", m.feature, backupPath)
+	} else {
+		m.message = fmt.Sprintf("已删除 feature: %s\n备份文件: %s", m.feature, backupPath)
+	}
+	m.state = "loading"
+	m.selected = 0
+	return m, m.loadEnvs
 }
 
 // initModuleSelector 初始化模块选择器
@@ -807,6 +862,45 @@ func (m *App) handleCreateModulesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *App) startRestoreBackups() tea.Cmd {
+	m.state = "restore_backups"
+	m.restoreBackups = nil
+	m.restoreCursor = 0
+	m.restoreBackupsLoaded = false
+	return m.loadRestoreBackups
+}
+
+func (m *App) loadRestoreBackups() tea.Msg {
+	if m.Engine == nil {
+		return restoreBackupsLoadedMsg{err: errors.New("TUI 引擎未初始化")}
+	}
+	backups, err := m.Engine.ListDeleteBackups(context.Background())
+	return restoreBackupsLoadedMsg{backups: backups, err: err}
+}
+
+func (m *App) handleRestoreBackupsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.restoreCursor > 0 {
+			m.restoreCursor--
+		}
+	case "down", "j":
+		if m.restoreCursor < len(m.restoreBackups)-1 {
+			m.restoreCursor++
+		}
+	case "enter":
+		if !m.restoreBackupsLoaded || len(m.restoreBackups) == 0 {
+			return m, nil
+		}
+		backup := m.restoreBackups[m.restoreCursor]
+		m.state = "loading"
+		return m, m.executeRestoreBackup(backup)
+	case "q", "esc", "ctrl+c":
+		m.state = "list"
+	}
+	return m, nil
+}
+
 // executeUpdateCode 执行主项目+模块更新，返回在后台运行并发送 updateDoneMsg 的 Cmd
 func (m *App) executeUpdateCode() tea.Cmd {
 	return func() tea.Msg {
@@ -820,6 +914,18 @@ func (m *App) executeUpdateWorktree(feature string) tea.Cmd {
 	return func() tea.Msg {
 		success, failed := m.Engine.UpdateWorktree(context.Background(), feature)
 		return updateDoneMsg{success: success, failed: failed, feature: feature}
+	}
+}
+
+func (m *App) executeRestoreBackup(backup engine.DeleteBackupInfo) tea.Cmd {
+	return func() tea.Msg {
+		if m.Engine == nil {
+			return restoreBackupDoneMsg{err: errors.New("TUI 引擎未初始化")}
+		}
+		result, err := m.Engine.RestoreDeleteBackup(context.Background(), engine.RestoreDeleteBackupOptions{
+			Backup: backup.ID,
+		})
+		return restoreBackupDoneMsg{result: result, err: err}
 	}
 }
 
@@ -921,6 +1027,8 @@ func (m *App) View() string {
 		return m.renderCreateInput()
 	case "create_modules":
 		return m.renderCreateModules()
+	case "restore_backups":
+		return m.renderRestoreBackups()
 	case "confirm":
 		return m.renderConfirm()
 	case "error":
@@ -959,7 +1067,7 @@ func (m *App) renderList() string {
 	var s strings.Builder
 	s.WriteString(headerStyle.Render("modu - Worktree Manager"))
 	s.WriteString("\n\n")
-	s.WriteString(itemStyle.Render("↑/↓ 选择  Enter 回车  n 新建 feature  m 管理模块  u 更新代码  c 复制路径\nd 删除  o 打开 VS Code  x 打开 Codex  q/esc 退出"))
+	s.WriteString(itemStyle.Render("↑/↓ 选择  Enter 回车  n 新建 feature  r 恢复备份  m 管理模块  u 更新代码  c 复制路径\nd 删除  o 打开 VS Code  x 打开 Codex  q/esc 退出"))
 	s.WriteString("\n\n")
 
 	total := m.listEntryCount()
@@ -986,6 +1094,9 @@ func (m *App) renderList() string {
 	for i := range m.Envs {
 		env := &m.Envs[i]
 		dirtyCount := 0
+		if env.MainProject != nil && env.MainProject.IsDirty {
+			dirtyCount++
+		}
 		for _, mod := range env.Modules {
 			if mod.IsDirty {
 				dirtyCount++
@@ -1018,12 +1129,56 @@ func (m *App) renderList() string {
 	return s.String()
 }
 
+func (m *App) renderRestoreBackups() string {
+	var s strings.Builder
+	s.WriteString(headerStyle.Render("恢复备份"))
+	s.WriteString("\n\n")
+
+	if !m.restoreBackupsLoaded {
+		s.WriteString(itemStyle.Render("加载中..."))
+		return s.String()
+	}
+	if len(m.restoreBackups) == 0 {
+		s.WriteString(itemStyle.Render("暂无可恢复备份"))
+		s.WriteString("\n\n")
+		s.WriteString(itemStyle.Render("q/esc 返回"))
+		return s.String()
+	}
+
+	if m.restoreCursor >= len(m.restoreBackups) {
+		m.restoreCursor = len(m.restoreBackups) - 1
+	}
+	for i, backup := range m.restoreBackups {
+		prefix := "  "
+		if i == m.restoreCursor {
+			prefix = "→ "
+		}
+		line := fmt.Sprintf("%s%s  %s  %s", prefix, backup.Feature, formatRestoreBackupTime(backup.CreatedAt), backup.ID)
+		if i == m.restoreCursor {
+			s.WriteString(selectedItemStyle.Render(line))
+		} else {
+			s.WriteString(itemStyle.Render(line))
+		}
+		s.WriteString("\n")
+	}
+	s.WriteString("\n")
+	s.WriteString(itemStyle.Render("↑/↓ 选择，Enter 恢复，q/esc 返回"))
+	return s.String()
+}
+
+func formatRestoreBackupTime(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.Format("2006-01-02 15:04:05")
+}
+
 func (m *App) renderConfirm() string {
 	var s strings.Builder
 	s.WriteString(headerStyle.Render("确认删除"))
 	s.WriteString("\n\n")
 	s.WriteString(fmt.Sprintf("确定要删除 feature「%s」吗？\n", m.feature))
-	s.WriteString(itemStyle.Render("按 y 确认，n 取消"))
+	s.WriteString(itemStyle.Render("按 y 确认，f 强制删除，n 取消"))
 	s.WriteString("\n\n")
 	return s.String()
 }

@@ -8,6 +8,7 @@
 | --------------- | ------------------------------------------ |
 | `create`        | 创建 feature 工作树                        |
 | `delete`        | 删除 feature 工作树                        |
+| `backup`        | 列出和恢复删除备份                         |
 | `default-select` | 设置创建 feature 时默认选中的模块          |
 | `list`          | 列出所有 feature 工作树                    |
 | `info`          | 查看 feature 详情                          |
@@ -144,6 +145,12 @@ modu delete my-feature
 modu delete my-feature --force  # 强制删除（跳过脏检查）
 # 删除成功前会先写入 <worktree-root>/.modu/backups/*.tar.gz，并在输出中显示“备份文件”
 
+# 查看和恢复删除备份
+modu backup list
+modu backup restore 20260515-153012_my-feature
+modu backup restore /path/to/20260515-153012_my-feature.tar.gz --feature recovered-feature
+# 恢复会优先使用备份内记录的原 feature 名，先重新创建备份中实际存在的 worktree，再覆盖内容；不会还原备份中的 .git 元数据
+
 # 设置默认选中的模块（创建 feature 时会默认选中这些模块）
 modu default-select
 
@@ -181,8 +188,10 @@ modu version
 | ↑/↓    | 上下选择 feature                 |
 | Enter  | 回车确认                        |
 | n      | 新建 feature                    |
+| r      | 恢复删除备份                    |
 | c      | 复制路径到剪贴板                 |
 | d      | 删除选中 feature                 |
+| f      | 删除确认页强制删除               |
 | m      | 管理模块（仅 feature 有效）      |
 | o      | 用 VS Code 打开主项目           |
 | x      | 用 Codex 打开主项目             |

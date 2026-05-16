@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"os"
 	"path/filepath"
@@ -408,6 +410,52 @@ func TestApp_HandleConfirmKey_DeleteSuccessShowsBackupPath(t *testing.T) {
 	}
 }
 
+func TestApp_HandleConfirmKey_ForceDeleteSkipsDirtyCheck(t *testing.T) {
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "workspace")
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	featurePath := filepath.Join(worktreeRoot, "restored-feature")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+	if err := os.MkdirAll(featurePath, 0755); err != nil {
+		t.Fatalf("failed to create feature path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(featurePath, "file.txt"), []byte("restored dirty content"), 0644); err != nil {
+		t.Fatalf("failed to write feature file: %v", err)
+	}
+
+	var statusCalls int
+	app := &App{
+		Engine: engine.NewWithClient(&config.Config{
+			Workspace:    workspace,
+			WorktreeRoot: worktreeRoot,
+			StrictDirty:  true,
+		}, &uiFakeGitClient{
+			getStatusFunc: func(ctx context.Context, path string) (gitproxy.Status, error) {
+				statusCalls++
+				return gitproxy.Status{Branch: "restored-feature", IsDirty: true}, nil
+			},
+		}),
+		state:   "confirm",
+		feature: "restored-feature",
+	}
+
+	_, cmd := app.handleConfirmKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	if cmd == nil {
+		t.Fatal("expected force delete success to reload list")
+	}
+	if app.state != "loading" {
+		t.Fatalf("state = %q, 期望 loading", app.state)
+	}
+	if statusCalls != 0 {
+		t.Fatalf("force delete should skip dirty status checks, got %d", statusCalls)
+	}
+	if !strings.Contains(app.message, "已强制删除 feature: restored-feature") {
+		t.Fatalf("missing force delete message: %q", app.message)
+	}
+}
+
 // TestApp_View_Error 错误状态视图包含错误信息
 func TestApp_View_Error(t *testing.T) {
 	app := &App{state: "error", err: nil}
@@ -440,6 +488,28 @@ func TestApp_View_List_WithMainAndEnvs(t *testing.T) {
 	}
 	if !strings.Contains(view, "main") || !strings.Contains(view, "feat-a") {
 		t.Errorf("renderList() 应包含 main 和 feat-a: %s", view)
+	}
+}
+
+func TestApp_View_List_FeatureMainProjectDirty(t *testing.T) {
+	app := &App{
+		state: "list",
+		Envs: []core.WorktreeEnv{{
+			Name: "feat-main-dirty",
+			MainProject: &core.ModuleStatus{
+				Name:    "main",
+				Path:    "/worktrees/feat-main-dirty",
+				IsDirty: true,
+				Branch:  "feat-main-dirty",
+			},
+			Modules: []core.ModuleStatus{{Name: "m1", IsDirty: false}},
+		}},
+		selected: 0,
+	}
+
+	view := app.renderList()
+	if !strings.Contains(view, "1 dirty") {
+		t.Fatalf("feature main project dirty should be visible, got:\n%s", view)
 	}
 }
 
@@ -674,6 +744,140 @@ func TestApp_ListKey_StartCreateAndQuit(t *testing.T) {
 	_, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	if cmd == nil {
 		t.Error("列表视图按 q 应保持退出行为")
+	}
+}
+
+func TestApp_ListKey_StartRestoreBackups(t *testing.T) {
+	tmpDir := t.TempDir()
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	backupPath := filepath.Join(worktreeRoot, ".modu", "backups", "20260515-120000_feature-restore.tar.gz")
+	writeUITestArchive(t, backupPath, "feature-restore/file.txt", "content")
+
+	app := &App{
+		Engine: engine.NewWithClient(&config.Config{
+			Workspace:    filepath.Join(tmpDir, "workspace"),
+			WorktreeRoot: worktreeRoot,
+			DefaultBase:  "develop",
+		}, &uiFakeGitClient{}),
+		state: "list",
+	}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd == nil {
+		t.Fatal("按 r 应返回加载备份命令")
+	}
+	if app.state != "restore_backups" {
+		t.Fatalf("按 r 后 state = %q，期望 restore_backups", app.state)
+	}
+
+	msg := cmd()
+	_, _ = app.Update(msg)
+	if len(app.restoreBackups) != 1 {
+		t.Fatalf("expected one restore backup, got %#v", app.restoreBackups)
+	}
+	view := app.renderRestoreBackups()
+	if !strings.Contains(view, "feature-restore") {
+		t.Fatalf("restore view should show backup feature, got:\n%s", view)
+	}
+}
+
+func TestApp_RestoreBackups_EmptyList(t *testing.T) {
+	app := &App{state: "restore_backups", restoreBackupsLoaded: true}
+
+	view := app.renderRestoreBackups()
+	if !strings.Contains(view, "暂无可恢复备份") {
+		t.Fatalf("empty restore view should explain no backups, got:\n%s", view)
+	}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd != nil {
+		t.Fatal("退出恢复列表不应返回命令")
+	}
+	if app.state != "list" {
+		t.Fatalf("q 后 state = %q，期望 list", app.state)
+	}
+}
+
+func TestApp_RestoreBackups_EnterRestoresSelectedBackup(t *testing.T) {
+	tmpDir := t.TempDir()
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	backupPath := filepath.Join(worktreeRoot, ".modu", "backups", "20260515-120000_feature-restore.tar.gz")
+	writeUITestArchive(t, backupPath, "feature-restore/file.txt", "restored")
+	fake := &uiFakeGitClient{}
+
+	app := &App{
+		Engine: engine.NewWithClient(&config.Config{
+			Workspace:    filepath.Join(tmpDir, "workspace"),
+			WorktreeRoot: worktreeRoot,
+			DefaultBase:  "develop",
+		}, fake),
+		state:                "restore_backups",
+		restoreBackupsLoaded: true,
+		restoreBackups: []engine.DeleteBackupInfo{{
+			ID:      "20260515-120000_feature-restore",
+			Feature: "feature-restore",
+			Path:    backupPath,
+		}},
+	}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("Enter 应返回恢复命令")
+	}
+	if app.state != "loading" {
+		t.Fatalf("Enter 后 state = %q，期望 loading", app.state)
+	}
+
+	msg := cmd()
+	_, refreshCmd := app.Update(msg)
+	if app.state != "loading" {
+		t.Fatalf("恢复成功后 state = %q，期望 loading 以刷新列表", app.state)
+	}
+	if refreshCmd == nil {
+		t.Fatal("恢复成功后应刷新列表")
+	}
+	if !strings.Contains(app.message, "已恢复备份: feature-restore") {
+		t.Fatalf("missing restore success message: %q", app.message)
+	}
+	requireUIFileContent(t, filepath.Join(worktreeRoot, "feature-restore", "file.txt"), "restored")
+	if len(fake.createWorktreeCalls) == 0 {
+		t.Fatal("expected restore to create worktree")
+	}
+}
+
+func writeUITestArchive(t *testing.T, path, entryName, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("failed to create archive parent: %v", err)
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("failed to create archive: %v", err)
+	}
+	defer file.Close()
+
+	gzipWriter := gzip.NewWriter(file)
+	defer gzipWriter.Close()
+	tarWriter := tar.NewWriter(gzipWriter)
+	defer tarWriter.Close()
+
+	header := &tar.Header{Name: entryName, Mode: 0644, Size: int64(len(body))}
+	if err := tarWriter.WriteHeader(header); err != nil {
+		t.Fatalf("failed to write archive header: %v", err)
+	}
+	if _, err := tarWriter.Write([]byte(body)); err != nil {
+		t.Fatalf("failed to write archive body: %v", err)
+	}
+}
+
+func requireUIFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read %s: %v", path, err)
+	}
+	if string(data) != want {
+		t.Fatalf("expected %s content %q, got %q", path, want, string(data))
 	}
 }
 
@@ -1069,6 +1273,7 @@ type uiFakeCreateWorktreeCall struct {
 type uiFakeGitClient struct {
 	remoteBranches      map[string]bool
 	createWorktreeCalls []uiFakeCreateWorktreeCall
+	getStatusFunc       func(ctx context.Context, path string) (gitproxy.Status, error)
 }
 
 func (f *uiFakeGitClient) Clone(ctx context.Context, url, path string) error {
@@ -1086,6 +1291,9 @@ func (f *uiFakeGitClient) CreateWorktree(ctx context.Context, repoPath, branch, 
 }
 
 func (f *uiFakeGitClient) GetStatus(ctx context.Context, path string) (gitproxy.Status, error) {
+	if f.getStatusFunc != nil {
+		return f.getStatusFunc(ctx, path)
+	}
 	return gitproxy.Status{Branch: "feat-a"}, nil
 }
 

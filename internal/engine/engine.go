@@ -10,8 +10,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +47,36 @@ type DeleteResult struct {
 	BackupPath string
 }
 
+// DeleteBackupInfo 描述一个可恢复的 delete 备份归档。
+type DeleteBackupInfo struct {
+	ID        string    `json:"id"`
+	Feature   string    `json:"feature"`
+	Path      string    `json:"path"`
+	CreatedAt time.Time `json:"createdAt"`
+	SizeBytes int64     `json:"sizeBytes"`
+	ModTime   time.Time `json:"modTime"`
+}
+
+// RestoreDeleteBackupOptions 描述恢复 delete 备份时的用户选择。
+type RestoreDeleteBackupOptions struct {
+	Backup  string
+	Feature string
+	Base    string
+}
+
+// RestoreDeleteBackupResult 描述 delete 备份恢复完成后的结果。
+type RestoreDeleteBackupResult struct {
+	Feature    string `json:"feature"`
+	Path       string `json:"path"`
+	BackupPath string `json:"backupPath"`
+}
+
+type deleteBackupArchiveMetadata struct {
+	RootName    string
+	Feature     string
+	ModuleNames map[string]bool
+}
+
 // worktreeResult 创建工作树的结果
 type worktreeResult struct {
 	module   config.Module
@@ -64,6 +96,7 @@ var (
 	deleteBackupNow              = time.Now
 	deleteBackupAfterTempCreated = func() {}
 	generatedDeleteBackupNameReg = regexp.MustCompile(`^\d{8}-\d{6}_.+\.tar\.gz$`)
+	deleteBackupNameReg          = regexp.MustCompile(`^(\d{8}-\d{6})_(.+)\.tar\.gz$`)
 )
 
 // New 创建引擎
@@ -719,6 +752,108 @@ func (e *Engine) CleanupDeleteBackups(ctx context.Context) error {
 	return nil
 }
 
+// ListDeleteBackups 返回当前 worktree-root 下可恢复的 delete 备份列表。
+func (e *Engine) ListDeleteBackups(ctx context.Context) ([]DeleteBackupInfo, error) {
+	backupDir := e.deleteBackupDir()
+	entries, err := os.ReadDir(backupDir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to read delete backup directory: %w", err)
+	}
+
+	backups := make([]DeleteBackupInfo, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("delete backup list canceled: %w", err)
+		}
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read delete backup info for %s: %w", entry.Name(), err)
+		}
+		backup, ok, err := e.deleteBackupInfoFromFile(ctx, filepath.Join(backupDir, entry.Name()), info)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			backups = append(backups, backup)
+		}
+	}
+
+	sort.Slice(backups, func(i, j int) bool {
+		if !backups[i].CreatedAt.Equal(backups[j].CreatedAt) {
+			return backups[i].CreatedAt.After(backups[j].CreatedAt)
+		}
+		return backups[i].Path > backups[j].Path
+	})
+	return backups, nil
+}
+
+// RestoreDeleteBackup 根据 ID 或路径恢复一个 delete 备份。
+func (e *Engine) RestoreDeleteBackup(ctx context.Context, opts RestoreDeleteBackupOptions) (*RestoreDeleteBackupResult, error) {
+	backup, err := e.resolveDeleteBackup(ctx, opts.Backup)
+	if err != nil {
+		return nil, err
+	}
+
+	metadata, err := readDeleteBackupArchiveMetadata(ctx, backup.Path, e.configuredModuleNames())
+	if err != nil {
+		return nil, err
+	}
+	feature := strings.TrimSpace(opts.Feature)
+	if feature == "" && strings.TrimSpace(metadata.Feature) != "" {
+		feature = strings.TrimSpace(metadata.Feature)
+	}
+	if feature == "" {
+		feature = backup.Feature
+	}
+	if feature == "" {
+		return nil, fmt.Errorf("delete backup feature is empty: %w", errs.ErrInvalidOperation)
+	}
+
+	_, featurePath, err := e.resolveDeleteFeaturePath(feature)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(featurePath); err == nil {
+		return nil, fmt.Errorf("feature %s already exists: %w", feature, errs.ErrFeatureExists)
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to check feature path %s: %w", featurePath, err)
+	}
+
+	base := strings.TrimSpace(opts.Base)
+	if base == "" {
+		base = strings.TrimSpace(e.Config.DefaultBase)
+	}
+	if base == "" {
+		base = "develop"
+	}
+
+	restoreEngine := e
+	if metadata.ModuleNames != nil {
+		restoreCfg := *e.Config
+		restoreCfg.Modules = filterModulesByName(e.Config.Modules, metadata.ModuleNames)
+		restoreEngine = NewWithClient(&restoreCfg, e.GitProxy)
+	}
+
+	if err := restoreEngine.CreateWorktree(ctx, feature, base); err != nil {
+		return nil, fmt.Errorf("failed to create worktree for restore: %w", err)
+	}
+	if err := extractDeleteBackupArchive(ctx, backup.Path, featurePath); err != nil {
+		return nil, err
+	}
+
+	return &RestoreDeleteBackupResult{
+		Feature:    feature,
+		Path:       featurePath,
+		BackupPath: backup.Path,
+	}, nil
+}
+
 // deleteBackupDir 返回固定 delete 备份目录。
 func (e *Engine) deleteBackupDir() string {
 	return filepath.Join(e.Config.WorktreeRoot, ".modu", "backups")
@@ -741,6 +876,318 @@ func (e *Engine) deleteBackupPath(feature string, suffix int) string {
 		return filepath.Join(backupDir, fmt.Sprintf("%s_%s.tar.gz", timestamp, dirName))
 	}
 	return filepath.Join(backupDir, fmt.Sprintf("%s_%s-%d.tar.gz", timestamp, dirName, suffix))
+}
+
+func (e *Engine) deleteBackupInfoFromFile(ctx context.Context, backupPath string, info fs.FileInfo) (DeleteBackupInfo, bool, error) {
+	id, createdAt, featureHint, ok := parseDeleteBackupFileName(filepath.Base(backupPath))
+	if !ok {
+		return DeleteBackupInfo{}, false, nil
+	}
+	feature := featureHint
+	if metadata, err := readDeleteBackupArchiveMetadata(ctx, backupPath, e.configuredModuleNames()); err == nil {
+		if strings.TrimSpace(metadata.Feature) != "" {
+			feature = strings.TrimSpace(metadata.Feature)
+		} else if metadata.RootName != "" {
+			feature = metadata.RootName
+		}
+	}
+	return DeleteBackupInfo{
+		ID:        id,
+		Feature:   feature,
+		Path:      backupPath,
+		CreatedAt: createdAt,
+		SizeBytes: info.Size(),
+		ModTime:   info.ModTime(),
+	}, true, nil
+}
+
+func parseDeleteBackupFileName(name string) (string, time.Time, string, bool) {
+	matches := deleteBackupNameReg.FindStringSubmatch(name)
+	if matches == nil {
+		return "", time.Time{}, "", false
+	}
+	createdAt, err := time.ParseInLocation(deleteBackupTimeLayout, matches[1], time.Local)
+	if err != nil {
+		return "", time.Time{}, "", false
+	}
+	id := strings.TrimSuffix(name, ".tar.gz")
+	return id, createdAt, matches[2], true
+}
+
+func (e *Engine) resolveDeleteBackup(ctx context.Context, backupRef string) (DeleteBackupInfo, error) {
+	backupRef = strings.TrimSpace(backupRef)
+	if backupRef == "" {
+		return DeleteBackupInfo{}, fmt.Errorf("delete backup is required: %w", errs.ErrInvalidOperation)
+	}
+
+	if filepath.IsAbs(backupRef) || strings.Contains(backupRef, string(os.PathSeparator)) {
+		backupPath, err := filepath.Abs(backupRef)
+		if err != nil {
+			return DeleteBackupInfo{}, fmt.Errorf("failed to resolve delete backup path: %w", err)
+		}
+		if err := e.ensurePathInDeleteBackupDir(backupPath); err != nil {
+			return DeleteBackupInfo{}, err
+		}
+		info, err := os.Stat(backupPath)
+		if err != nil {
+			return DeleteBackupInfo{}, fmt.Errorf("delete backup %s not found: %w", backupPath, errs.ErrFeatureNotFound)
+		}
+		backup, ok, err := e.deleteBackupInfoFromFile(ctx, backupPath, info)
+		if err != nil {
+			return DeleteBackupInfo{}, err
+		}
+		if !ok {
+			return DeleteBackupInfo{}, fmt.Errorf("delete backup %s is not generated by modu: %w", backupPath, errs.ErrInvalidOperation)
+		}
+		return backup, nil
+	}
+
+	backups, err := e.ListDeleteBackups(ctx)
+	if err != nil {
+		return DeleteBackupInfo{}, err
+	}
+	for _, backup := range backups {
+		if backup.ID == backupRef || filepath.Base(backup.Path) == backupRef {
+			return backup, nil
+		}
+	}
+	return DeleteBackupInfo{}, fmt.Errorf("delete backup %s not found: %w", backupRef, errs.ErrFeatureNotFound)
+}
+
+func (e *Engine) ensurePathInDeleteBackupDir(backupPath string) error {
+	backupDir, err := filepath.Abs(e.deleteBackupDir())
+	if err != nil {
+		return fmt.Errorf("failed to resolve delete backup directory: %w", err)
+	}
+	rel, err := filepath.Rel(backupDir, backupPath)
+	if err != nil {
+		return fmt.Errorf("failed to validate delete backup path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("delete backup path %s is outside backup directory: %w", backupPath, errs.ErrInvalidOperation)
+	}
+	return nil
+}
+
+func readDeleteBackupArchiveMetadata(ctx context.Context, backupPath string, configuredModules map[string]bool) (deleteBackupArchiveMetadata, error) {
+	file, err := os.Open(backupPath)
+	if err != nil {
+		return deleteBackupArchiveMetadata{}, err
+	}
+	defer file.Close()
+
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		return deleteBackupArchiveMetadata{}, err
+	}
+	defer gzipReader.Close()
+
+	metadata := deleteBackupArchiveMetadata{
+		ModuleNames: make(map[string]bool),
+	}
+	tarReader := tar.NewReader(gzipReader)
+	for {
+		if err := ctx.Err(); err != nil {
+			return deleteBackupArchiveMetadata{}, err
+		}
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			return metadata, nil
+		}
+		if err != nil {
+			return deleteBackupArchiveMetadata{}, err
+		}
+		cleanName, err := safeTarEntryName(header.Name)
+		if err != nil {
+			return deleteBackupArchiveMetadata{}, err
+		}
+		parts := strings.Split(cleanName, "/")
+		if len(parts) == 0 || parts[0] == "." || parts[0] == "" {
+			continue
+		}
+		if metadata.RootName == "" {
+			metadata.RootName = parts[0]
+		}
+		if len(parts) >= 2 && configuredModules[parts[1]] {
+			metadata.ModuleNames[parts[1]] = true
+		}
+		if len(parts) == 2 && parts[1] == parts[0]+".code-workspace" && header.Typeflag == tar.TypeReg {
+			feature, err := readWorkspaceFeatureFromTarEntry(tarReader, header.Size)
+			if err != nil {
+				return deleteBackupArchiveMetadata{}, err
+			}
+			if strings.TrimSpace(feature) != "" {
+				metadata.Feature = strings.TrimSpace(feature)
+			}
+		}
+	}
+}
+
+func validateDeleteBackupArchive(ctx context.Context, backupPath string) error {
+	return walkDeleteBackupArchive(ctx, backupPath, func(header *tar.Header, _ io.Reader) error {
+		_, _, err := deleteBackupRelativeEntryName(header.Name)
+		return err
+	})
+}
+
+func readWorkspaceFeatureFromTarEntry(reader io.Reader, size int64) (string, error) {
+	if size < 0 || size > 1024*1024 {
+		return "", fmt.Errorf("workspace metadata is too large: %w", errs.ErrInvalidOperation)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return "", fmt.Errorf("failed to read workspace metadata from backup: %w", err)
+	}
+	var workspace vscodeWorkspace
+	if err := json.Unmarshal(data, &workspace); err != nil {
+		return "", nil
+	}
+	return strings.TrimSpace(workspace.Modu.Feature), nil
+}
+
+func filterModulesByName(modules []config.Module, names map[string]bool) []config.Module {
+	filtered := make([]config.Module, 0, len(modules))
+	for _, module := range modules {
+		if names[module.Name] {
+			filtered = append(filtered, module)
+		}
+	}
+	return filtered
+}
+
+func extractDeleteBackupArchive(ctx context.Context, backupPath, destinationRoot string) error {
+	destinationRootAbs, err := filepath.Abs(destinationRoot)
+	if err != nil {
+		return fmt.Errorf("failed to resolve restore destination: %w", err)
+	}
+
+	return walkDeleteBackupArchive(ctx, backupPath, func(header *tar.Header, reader io.Reader) error {
+		relativeName, shouldWrite, err := deleteBackupRelativeEntryName(header.Name)
+		if err != nil {
+			return err
+		}
+		if !shouldWrite {
+			return nil
+		}
+		destinationPath, err := deleteBackupEntryDestination(destinationRootAbs, relativeName)
+		if err != nil {
+			return err
+		}
+
+		mode := header.FileInfo().Mode()
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(destinationPath, mode.Perm()); err != nil {
+				return fmt.Errorf("failed to create restore directory %s: %w", destinationPath, err)
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if err := os.MkdirAll(filepath.Dir(destinationPath), 0755); err != nil {
+				return fmt.Errorf("failed to create restore parent %s: %w", filepath.Dir(destinationPath), err)
+			}
+			file, err := os.OpenFile(destinationPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
+			if err != nil {
+				return fmt.Errorf("failed to create restore file %s: %w", destinationPath, err)
+			}
+			copyErr := copyWithContext(ctx, file, reader)
+			closeErr := file.Close()
+			if copyErr != nil {
+				return fmt.Errorf("failed to restore file %s: %w", destinationPath, copyErr)
+			}
+			if closeErr != nil {
+				return fmt.Errorf("failed to close restore file %s: %w", destinationPath, closeErr)
+			}
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(destinationPath), 0755); err != nil {
+				return fmt.Errorf("failed to create restore parent %s: %w", filepath.Dir(destinationPath), err)
+			}
+			_ = os.Remove(destinationPath)
+			if err := os.Symlink(header.Linkname, destinationPath); err != nil {
+				return fmt.Errorf("failed to restore symlink %s: %w", destinationPath, err)
+			}
+		}
+		return nil
+	})
+}
+
+func walkDeleteBackupArchive(ctx context.Context, backupPath string, visit func(header *tar.Header, reader io.Reader) error) error {
+	file, err := os.Open(backupPath)
+	if err != nil {
+		return fmt.Errorf("failed to open delete backup %s: %w", backupPath, err)
+	}
+	defer file.Close()
+
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		return fmt.Errorf("failed to read delete backup gzip %s: %w", backupPath, err)
+	}
+	defer gzipReader.Close()
+
+	tarReader := tar.NewReader(gzipReader)
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("delete backup restore canceled: %w", err)
+		}
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read delete backup archive %s: %w", backupPath, err)
+		}
+		if err := visit(header, tarReader); err != nil {
+			return err
+		}
+	}
+}
+
+func deleteBackupRelativeEntryName(name string) (string, bool, error) {
+	cleanName, err := safeTarEntryName(name)
+	if err != nil {
+		return "", false, err
+	}
+	parts := strings.Split(cleanName, "/")
+	if len(parts) <= 1 {
+		return "", false, nil
+	}
+	relativeParts := parts[1:]
+	for _, part := range relativeParts {
+		if part == ".git" {
+			return "", false, nil
+		}
+	}
+	relativeName := path.Join(relativeParts...)
+	if relativeName == "." || relativeName == "" {
+		return "", false, nil
+	}
+	return filepath.FromSlash(relativeName), true, nil
+}
+
+func safeTarEntryName(name string) (string, error) {
+	if name == "" || path.IsAbs(name) {
+		return "", fmt.Errorf("unsafe delete backup entry %q: %w", name, errs.ErrInvalidOperation)
+	}
+	for _, part := range strings.Split(name, "/") {
+		if part == ".." {
+			return "", fmt.Errorf("unsafe delete backup entry %q: %w", name, errs.ErrInvalidOperation)
+		}
+	}
+	cleanName := path.Clean(name)
+	if cleanName == "." || cleanName == ".." || strings.HasPrefix(cleanName, "../") {
+		return "", fmt.Errorf("unsafe delete backup entry %q: %w", name, errs.ErrInvalidOperation)
+	}
+	return cleanName, nil
+}
+
+func deleteBackupEntryDestination(destinationRoot, relativeName string) (string, error) {
+	destinationPath := filepath.Join(destinationRoot, relativeName)
+	rel, err := filepath.Rel(destinationRoot, destinationPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to validate restore path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("restore path %s is outside destination: %w", destinationPath, errs.ErrInvalidOperation)
+	}
+	return destinationPath, nil
 }
 
 // writeTarGzArchive 写入 feature 目录的 tar.gz 归档。
@@ -1023,9 +1470,8 @@ func (e *Engine) ListWorktrees(ctx context.Context) ([]core.WorktreeEnv, error) 
 			continue
 		}
 
-		// 直接使用目录名作为 feature 名
-		feature := entry.Name()
 		featurePath := filepath.Join(e.Config.WorktreeRoot, entry.Name())
+		feature := e.resolveWorktreeFeature(ctx, featurePath, entry.Name(), entry.Name())
 
 		env := core.WorktreeEnv{
 			Name:        feature,

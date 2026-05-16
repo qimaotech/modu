@@ -1,6 +1,8 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
@@ -8,9 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/qimaotech/modu/internal/config"
 	"github.com/qimaotech/modu/internal/engine"
+	"github.com/spf13/cobra"
 )
 
 func TestIsInteractiveTerminal(t *testing.T) {
@@ -362,4 +366,98 @@ func TestCleanupDeleteBackups_WritesWarningToStderr(t *testing.T) {
 	if string(stdoutData) != "" {
 		t.Fatalf("expected empty stdout, got %q", string(stdoutData))
 	}
+}
+
+func TestRunBackupList_DoesNotCleanupExpiredBackups(t *testing.T) {
+	tmpDir := t.TempDir()
+	backupPath := filepath.Join(tmpDir, "worktrees", ".modu", "backups", "20260401-010203_feature-old.tar.gz")
+	writeMainTestArchive(t, backupPath, "feature-old/file.txt", "old content")
+	oldTime := timeNowForTest().AddDate(0, 0, -60)
+	if err := os.Chtimes(backupPath, oldTime, oldTime); err != nil {
+		t.Fatalf("failed to set backup time: %v", err)
+	}
+
+	configFile := filepath.Join(tmpDir, ".modu.yaml")
+	if err := os.WriteFile(configFile, []byte("workspace: "+tmpDir+"\nworktree-root: "+filepath.Join(tmpDir, "worktrees")+"\ndefault-base: develop\nconcurrency: 1\nmodules:\n  - name: module1\n    url: git@example.com:module1.git\ndelete-backup:\n  retention-days: 30\n"), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	oldConfigPath := configPath
+	oldOutputFmt := outputFmt
+	configPath = configFile
+	outputFmt = "text"
+	defer func() {
+		configPath = oldConfigPath
+		outputFmt = oldOutputFmt
+	}()
+
+	stdout := captureMainStdout(t, func() {
+		runBackupList(testCommand(t), nil)
+	})
+	if !strings.Contains(stdout, "20260401-010203_feature-old") {
+		t.Fatalf("expected backup in output, got %q", stdout)
+	}
+	if _, err := os.Stat(backupPath); err != nil {
+		t.Fatalf("expected expired backup to remain for restore, got %v", err)
+	}
+}
+
+func writeMainTestArchive(t *testing.T, path, entryName, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("failed to create archive parent: %v", err)
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("failed to create archive: %v", err)
+	}
+	defer file.Close()
+
+	gzipWriter := gzip.NewWriter(file)
+	defer gzipWriter.Close()
+	tarWriter := tar.NewWriter(gzipWriter)
+	defer tarWriter.Close()
+
+	header := &tar.Header{
+		Name: entryName,
+		Mode: 0644,
+		Size: int64(len(body)),
+	}
+	if err := tarWriter.WriteHeader(header); err != nil {
+		t.Fatalf("failed to write archive header: %v", err)
+	}
+	if _, err := tarWriter.Write([]byte(body)); err != nil {
+		t.Fatalf("failed to write archive body: %v", err)
+	}
+}
+
+func captureMainStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	oldStdout := os.Stdout
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create stdout pipe: %v", err)
+	}
+	os.Stdout = writePipe
+	defer func() {
+		os.Stdout = oldStdout
+	}()
+	fn()
+	_ = writePipe.Close()
+	data, err := io.ReadAll(readPipe)
+	if err != nil {
+		t.Fatalf("failed to read stdout: %v", err)
+	}
+	return string(data)
+}
+
+func testCommand(t *testing.T) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "test"}
+	cmd.SetContext(context.Background())
+	return cmd
+}
+
+func timeNowForTest() time.Time {
+	return time.Now()
 }

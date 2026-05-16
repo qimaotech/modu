@@ -1411,10 +1411,316 @@ func TestCleanupDeleteBackups_MissingDirectorySucceeds(t *testing.T) {
 	requirePathMissing(t, filepath.Join(worktreeRoot, ".modu", "backups"))
 }
 
+func TestListDeleteBackups_MetadataAndSorting(t *testing.T) {
+	tmpDir := t.TempDir()
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	engine := New(&config.Config{WorktreeRoot: worktreeRoot})
+
+	oldFeaturePath := filepath.Join(worktreeRoot, "feature-old")
+	newFeaturePath := filepath.Join(worktreeRoot, "feature-new")
+	writeTestFile(t, filepath.Join(oldFeaturePath, "old.txt"), "old")
+	writeTestFile(t, filepath.Join(newFeaturePath, "new.txt"), "new")
+
+	oldTime := time.Date(2026, 5, 14, 10, 0, 0, 0, time.Local)
+	restoreNow := useFixedDeleteBackupNow(oldTime)
+	oldBackup, err := engine.createDeleteBackup(context.Background(), "feature/old", oldFeaturePath)
+	restoreNow()
+	if err != nil {
+		t.Fatalf("create old backup failed: %v", err)
+	}
+
+	newTime := time.Date(2026, 5, 15, 10, 0, 0, 0, time.Local)
+	restoreNow = useFixedDeleteBackupNow(newTime)
+	newBackup, err := engine.createDeleteBackup(context.Background(), "feature/new", newFeaturePath)
+	restoreNow()
+	if err != nil {
+		t.Fatalf("create new backup failed: %v", err)
+	}
+
+	writeTestFile(t, filepath.Join(worktreeRoot, ".modu", "backups", "manual.tar.gz"), "manual")
+
+	backups, err := engine.ListDeleteBackups(context.Background())
+	if err != nil {
+		t.Fatalf("ListDeleteBackups failed: %v", err)
+	}
+	if len(backups) != 2 {
+		t.Fatalf("expected 2 generated backups, got %d: %#v", len(backups), backups)
+	}
+	if backups[0].Path != newBackup || backups[1].Path != oldBackup {
+		t.Fatalf("expected newest-first backup order, got %#v", backups)
+	}
+	if backups[0].ID != "20260515-100000_feature-new" {
+		t.Fatalf("unexpected backup id: %s", backups[0].ID)
+	}
+	if backups[0].Feature != "feature-new" {
+		t.Fatalf("expected feature-new, got %s", backups[0].Feature)
+	}
+	if backups[0].CreatedAt.IsZero() || backups[0].SizeBytes == 0 || backups[0].ModTime.IsZero() {
+		t.Fatalf("expected populated backup metadata, got %#v", backups[0])
+	}
+}
+
+func TestListDeleteBackups_MissingDirectoryReturnsEmpty(t *testing.T) {
+	engine := New(&config.Config{WorktreeRoot: filepath.Join(t.TempDir(), "worktrees")})
+
+	backups, err := engine.ListDeleteBackups(context.Background())
+	if err != nil {
+		t.Fatalf("ListDeleteBackups failed: %v", err)
+	}
+	if len(backups) != 0 {
+		t.Fatalf("expected empty list, got %#v", backups)
+	}
+}
+
+func TestRestoreDeleteBackup_CreatesWorktreeAndOverlaysContentSkippingGit(t *testing.T) {
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "workspace")
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	sourcePath := filepath.Join(worktreeRoot, "feature-restore")
+	writeTestFile(t, filepath.Join(sourcePath, "main.txt"), "restored")
+	writeTestFile(t, filepath.Join(sourcePath, ".git", "config"), "stale config")
+
+	fixedTime := time.Date(2026, 5, 15, 11, 0, 0, 0, time.Local)
+	restoreNow := useFixedDeleteBackupNow(fixedTime)
+	backupEngine := New(&config.Config{WorktreeRoot: worktreeRoot})
+	backupPath, err := backupEngine.createDeleteBackup(context.Background(), "feature/restore", sourcePath)
+	restoreNow()
+	if err != nil {
+		t.Fatalf("create backup failed: %v", err)
+	}
+	if err := os.RemoveAll(sourcePath); err != nil {
+		t.Fatalf("remove source failed: %v", err)
+	}
+
+	var createdBranch string
+	var createdBase string
+	var createdPath string
+	engine := NewWithClient(&config.Config{
+		Workspace:    workspace,
+		WorktreeRoot: worktreeRoot,
+		DefaultBase:  "develop",
+	}, &MockGitClient{
+		BranchExistsFunc: func(ctx context.Context, repoPath, branch string) bool {
+			return false
+		},
+		CreateWorktreeFunc: func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+			createdBranch = branch
+			createdBase = baseBranch
+			createdPath = worktreePath
+			writeTestFile(t, filepath.Join(worktreePath, ".git"), "fresh git metadata")
+			return nil
+		},
+	})
+
+	result, err := engine.RestoreDeleteBackup(context.Background(), RestoreDeleteBackupOptions{
+		Backup: "20260515-110000_feature-restore",
+	})
+	if err != nil {
+		t.Fatalf("RestoreDeleteBackup failed: %v", err)
+	}
+	if result.Feature != "feature-restore" {
+		t.Fatalf("expected restored feature feature-restore, got %s", result.Feature)
+	}
+	if result.Path != filepath.Join(worktreeRoot, "feature-restore") {
+		t.Fatalf("unexpected restore path: %s", result.Path)
+	}
+	if result.BackupPath != backupPath {
+		t.Fatalf("expected backup path %s, got %s", backupPath, result.BackupPath)
+	}
+	if createdBranch != "feature-restore" || createdBase != "develop" || createdPath != result.Path {
+		t.Fatalf("unexpected create call branch=%s base=%s path=%s", createdBranch, createdBase, createdPath)
+	}
+	requireFileContent(t, filepath.Join(result.Path, "main.txt"), "restored")
+	requireFileContent(t, filepath.Join(result.Path, ".git"), "fresh git metadata")
+	if _, err := os.Stat(filepath.Join(result.Path, ".git", "config")); err == nil {
+		t.Fatal("expected archived .git/config to be skipped")
+	}
+}
+
+func TestRestoreDeleteBackup_UsesArchivedFeatureAndModules(t *testing.T) {
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "workspace")
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	sourcePath := filepath.Join(worktreeRoot, "feature-restore")
+	writeTestFile(t, filepath.Join(sourcePath, "main.txt"), "restored")
+	writeTestFile(t, filepath.Join(sourcePath, "module1", "module.txt"), "module1")
+	writeWorkspaceMetadata(t, filepath.Join(sourcePath, "feature-restore.code-workspace"), "feature/restore", "feature-restore")
+
+	fixedTime := time.Date(2026, 5, 15, 11, 30, 0, 0, time.Local)
+	restoreNow := useFixedDeleteBackupNow(fixedTime)
+	backupEngine := New(&config.Config{WorktreeRoot: worktreeRoot})
+	backupPath, err := backupEngine.createDeleteBackup(context.Background(), "feature/restore", sourcePath)
+	restoreNow()
+	if err != nil {
+		t.Fatalf("create backup failed: %v", err)
+	}
+	if err := os.RemoveAll(sourcePath); err != nil {
+		t.Fatalf("remove source failed: %v", err)
+	}
+
+	var created []restoreCreateWorktreeCall
+	engine := NewWithClient(&config.Config{
+		Workspace:    workspace,
+		WorktreeRoot: worktreeRoot,
+		DefaultBase:  "develop",
+		Modules: []config.Module{
+			{Name: "module1", URL: "git@example.com:module1.git"},
+			{Name: "module2", URL: "git@example.com:module2.git"},
+		},
+		Concurrency: 2,
+	}, &MockGitClient{
+		BranchExistsFunc: func(ctx context.Context, repoPath, branch string) bool {
+			return false
+		},
+		CreateWorktreeFunc: func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+			created = append(created, restoreCreateWorktreeCall{
+				repoPath:      repoPath,
+				branch:        branch,
+				baseBranch:    baseBranch,
+				worktreePath:  worktreePath,
+				worktreeDir:   filepath.Base(worktreePath),
+				repositoryDir: filepath.Base(repoPath),
+			})
+			return os.MkdirAll(worktreePath, 0755)
+		},
+	})
+
+	result, err := engine.RestoreDeleteBackup(context.Background(), RestoreDeleteBackupOptions{
+		Backup: backupPath,
+	})
+	if err != nil {
+		t.Fatalf("RestoreDeleteBackup failed: %v", err)
+	}
+	if result.Feature != "feature/restore" {
+		t.Fatalf("expected original feature feature/restore, got %s", result.Feature)
+	}
+	if result.Path != filepath.Join(worktreeRoot, "feature-restore") {
+		t.Fatalf("unexpected restore path: %s", result.Path)
+	}
+	requireCreatedWorktree(t, created, workspace, "feature/restore", "develop", result.Path)
+	requireCreatedWorktree(t, created, filepath.Join(workspace, "module1"), "feature/restore", "develop", filepath.Join(result.Path, "module1"))
+	requireNoCreatedWorktree(t, created, filepath.Join(workspace, "module2"))
+}
+
+func TestListWorktrees_UsesWorkspaceFeatureMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "workspace")
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	featurePath := filepath.Join(worktreeRoot, "feature-restore")
+	writeWorkspaceMetadata(t, filepath.Join(featurePath, "feature-restore.code-workspace"), "feature/restore", "feature-restore")
+
+	engine := NewWithClient(&config.Config{
+		Workspace:    workspace,
+		WorktreeRoot: worktreeRoot,
+	}, &MockGitClient{
+		GetStatusFunc: func(ctx context.Context, path string) (gitproxy.Status, error) {
+			return gitproxy.Status{Branch: "feature/restore"}, nil
+		},
+	})
+
+	envs, err := engine.ListWorktrees(context.Background())
+	if err != nil {
+		t.Fatalf("ListWorktrees failed: %v", err)
+	}
+	if len(envs) != 1 {
+		t.Fatalf("expected 1 worktree, got %#v", envs)
+	}
+	if envs[0].Name != "feature/restore" {
+		t.Fatalf("expected original feature name, got %s", envs[0].Name)
+	}
+	if envs[0].DirName != "feature-restore" {
+		t.Fatalf("expected dir name feature-restore, got %s", envs[0].DirName)
+	}
+}
+
+func TestRestoreDeleteBackup_ExistingDestinationFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	sourcePath := filepath.Join(worktreeRoot, "feature-restore")
+	writeTestFile(t, filepath.Join(sourcePath, "main.txt"), "restored")
+
+	engine := New(&config.Config{WorktreeRoot: worktreeRoot})
+	backupPath, err := engine.createDeleteBackup(context.Background(), "feature/restore", sourcePath)
+	if err != nil {
+		t.Fatalf("create backup failed: %v", err)
+	}
+	if err := os.RemoveAll(sourcePath); err != nil {
+		t.Fatalf("remove source failed: %v", err)
+	}
+	writeTestFile(t, filepath.Join(sourcePath, "existing.txt"), "keep")
+
+	var createCalls int
+	restoreEngine := NewWithClient(&config.Config{
+		Workspace:    filepath.Join(tmpDir, "workspace"),
+		WorktreeRoot: worktreeRoot,
+	}, &MockGitClient{
+		CreateWorktreeFunc: func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+			createCalls++
+			return nil
+		},
+	})
+
+	result, err := restoreEngine.RestoreDeleteBackup(context.Background(), RestoreDeleteBackupOptions{
+		Backup: backupPath,
+	})
+	if !errors.Is(err, errs.ErrFeatureExists) {
+		t.Fatalf("expected feature exists error, got result=%#v err=%v", result, err)
+	}
+	if result != nil {
+		t.Fatalf("expected nil result, got %#v", result)
+	}
+	if createCalls != 0 {
+		t.Fatalf("expected no create calls, got %d", createCalls)
+	}
+	requireFileContent(t, filepath.Join(sourcePath, "existing.txt"), "keep")
+}
+
+func TestRestoreDeleteBackup_RejectsUnsafeArchivePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	backupDir := filepath.Join(worktreeRoot, ".modu", "backups")
+	backupPath := filepath.Join(backupDir, "20260515-120000_feature-unsafe.tar.gz")
+	writeTarGzTestArchive(t, backupPath, map[string]string{
+		"feature-unsafe/../../evil.txt": "evil",
+	})
+
+	engine := NewWithClient(&config.Config{
+		Workspace:    filepath.Join(tmpDir, "workspace"),
+		WorktreeRoot: worktreeRoot,
+	}, &MockGitClient{
+		BranchExistsFunc: func(ctx context.Context, repoPath, branch string) bool {
+			return false
+		},
+		CreateWorktreeFunc: func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+			return os.MkdirAll(worktreePath, 0755)
+		},
+	})
+
+	result, err := engine.RestoreDeleteBackup(context.Background(), RestoreDeleteBackupOptions{
+		Backup: backupPath,
+	})
+	if !errors.Is(err, errs.ErrInvalidOperation) {
+		t.Fatalf("expected invalid operation, got result=%#v err=%v", result, err)
+	}
+	if result != nil {
+		t.Fatalf("expected nil result, got %#v", result)
+	}
+	requirePathMissing(t, filepath.Join(tmpDir, "evil.txt"))
+}
+
 type archiveEntry struct {
 	typeFlag byte
 	linkName string
 	body     string
+}
+
+type restoreCreateWorktreeCall struct {
+	repoPath      string
+	branch        string
+	baseBranch    string
+	worktreePath  string
+	worktreeDir   string
+	repositoryDir string
 }
 
 func writeTestFile(t *testing.T, path, content string) {
@@ -1584,6 +1890,71 @@ func requireArchiveEntry(t *testing.T, entries map[string]archiveEntry, name str
 		t.Fatalf("expected archive entry %s type %d, got %d", name, typeFlag, entry.typeFlag)
 	}
 	return entry
+}
+
+func writeWorkspaceMetadata(t *testing.T, path, feature, dirName string) {
+	t.Helper()
+	workspace := vscodeWorkspace{
+		Modu: moduWorkspaceMeta{
+			Feature: feature,
+			DirName: dirName,
+		},
+	}
+	data, err := json.Marshal(workspace)
+	if err != nil {
+		t.Fatalf("failed to marshal workspace metadata: %v", err)
+	}
+	writeTestFile(t, path, string(data))
+}
+
+func requireCreatedWorktree(t *testing.T, calls []restoreCreateWorktreeCall, repoPath, branch, baseBranch, worktreePath string) {
+	t.Helper()
+	for _, call := range calls {
+		if call.repoPath == repoPath && call.branch == branch && call.baseBranch == baseBranch && call.worktreePath == worktreePath {
+			return
+		}
+	}
+	t.Fatalf("expected create call repo=%s branch=%s base=%s path=%s, got %#v", repoPath, branch, baseBranch, worktreePath, calls)
+}
+
+func requireNoCreatedWorktree(t *testing.T, calls []restoreCreateWorktreeCall, repoPath string) {
+	t.Helper()
+	for _, call := range calls {
+		if call.repoPath == repoPath {
+			t.Fatalf("expected no create call for repo=%s, got %#v", repoPath, calls)
+		}
+	}
+}
+
+func writeTarGzTestArchive(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("failed to create archive parent: %v", err)
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("failed to create archive: %v", err)
+	}
+	defer file.Close()
+
+	gz := gzip.NewWriter(file)
+	defer gz.Close()
+	tw := tar.NewWriter(gz)
+	defer tw.Close()
+
+	for name, body := range files {
+		header := &tar.Header{
+			Name: name,
+			Mode: 0644,
+			Size: int64(len(body)),
+		}
+		if err := tw.WriteHeader(header); err != nil {
+			t.Fatalf("failed to write header: %v", err)
+		}
+		if _, err := tw.Write([]byte(body)); err != nil {
+			t.Fatalf("failed to write body: %v", err)
+		}
+	}
 }
 
 func useFixedDeleteBackupNow(now time.Time) func() {

@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/qimaotech/modu/internal/core"
+	"github.com/qimaotech/modu/internal/engine"
 )
 
 // TestNew_DefaultFormat 测试默认格式
@@ -144,6 +146,99 @@ func TestFormatDeleteResponse_Json(t *testing.T) {
 	}
 }
 
+func TestFormatBackupListResponse_Text(t *testing.T) {
+	formatter := New("text")
+	backups := []engine.DeleteBackupInfo{{
+		ID:        "20260515-153012_feature-test",
+		Feature:   "feature-test",
+		Path:      "/worktrees/.modu/backups/20260515-153012_feature-test.tar.gz",
+		CreatedAt: time.Date(2026, 5, 15, 15, 30, 12, 0, time.Local),
+		SizeBytes: 1024,
+	}}
+
+	output := formatter.FormatBackupListResponse(backups)
+
+	if !contains(output, "备份列表:") {
+		t.Error("expected backup list header")
+	}
+	if !contains(output, "20260515-153012_feature-test") {
+		t.Error("expected backup id")
+	}
+	if !contains(output, "feature-test") {
+		t.Error("expected feature")
+	}
+	if !contains(output, "路径: /worktrees/.modu/backups/20260515-153012_feature-test.tar.gz") {
+		t.Error("expected backup path")
+	}
+}
+
+func TestFormatBackupListResponse_Json(t *testing.T) {
+	formatter := New("json")
+	backups := []engine.DeleteBackupInfo{{
+		ID:        "20260515-153012_feature-test",
+		Feature:   "feature-test",
+		Path:      "/worktrees/.modu/backups/20260515-153012_feature-test.tar.gz",
+		CreatedAt: time.Date(2026, 5, 15, 15, 30, 12, 0, time.Local),
+		SizeBytes: 1024,
+	}}
+
+	output := formatter.FormatBackupListResponse(backups)
+
+	var resp BackupListResponse
+	if err := json.Unmarshal([]byte(output), &resp); err != nil {
+		t.Fatalf("unexpected json error: %v", err)
+	}
+	if !resp.Success || resp.Action != "backup-list" {
+		t.Fatalf("unexpected response metadata: %#v", resp)
+	}
+	if len(resp.Backups) != 1 || resp.Backups[0].ID != backups[0].ID {
+		t.Fatalf("unexpected backups: %#v", resp.Backups)
+	}
+}
+
+func TestFormatBackupRestoreResponse_Text(t *testing.T) {
+	formatter := New("text")
+	result := &engine.RestoreDeleteBackupResult{
+		Feature:    "feature-test",
+		Path:       "/worktrees/feature-test",
+		BackupPath: "/worktrees/.modu/backups/20260515-153012_feature-test.tar.gz",
+	}
+
+	output := formatter.FormatBackupRestoreResponse(result)
+
+	if !contains(output, "已恢复备份: feature-test") {
+		t.Error("expected restore success message")
+	}
+	if !contains(output, "目标路径: /worktrees/feature-test") {
+		t.Error("expected restore path")
+	}
+	if !contains(output, "备份文件: "+result.BackupPath) {
+		t.Error("expected backup path")
+	}
+}
+
+func TestFormatBackupRestoreResponse_Json(t *testing.T) {
+	formatter := New("json")
+	result := &engine.RestoreDeleteBackupResult{
+		Feature:    "feature-test",
+		Path:       "/worktrees/feature-test",
+		BackupPath: "/worktrees/.modu/backups/20260515-153012_feature-test.tar.gz",
+	}
+
+	output := formatter.FormatBackupRestoreResponse(result)
+
+	var resp BackupRestoreResponse
+	if err := json.Unmarshal([]byte(output), &resp); err != nil {
+		t.Fatalf("unexpected json error: %v", err)
+	}
+	if !resp.Success || resp.Action != "backup-restore" {
+		t.Fatalf("unexpected response metadata: %#v", resp)
+	}
+	if resp.Feature != result.Feature || resp.Path != result.Path || resp.BackupPath != result.BackupPath {
+		t.Fatalf("unexpected restore response: %#v", resp)
+	}
+}
+
 // TestFormatError_Text 测试文本格式错误响应
 func TestFormatError_Text(t *testing.T) {
 	formatter := New("text")
@@ -202,6 +297,49 @@ func TestFormatListResponse_Text(t *testing.T) {
 	}
 	if !contains(output, "dirty") {
 		t.Error("expected dirty status")
+	}
+}
+
+func TestFormatListResponse_Text_ShowsMainProjectDirty(t *testing.T) {
+	formatter := New("text")
+	envs := []core.WorktreeEnv{
+		{
+			Name: "feature-main-dirty",
+			MainProject: &core.ModuleStatus{
+				Name:    "main",
+				Path:    "/path/to/main",
+				IsDirty: true,
+				Branch:  "feature-main-dirty",
+			},
+			Modules: []core.ModuleStatus{
+				{Name: "module1", Branch: "feature-main-dirty", IsDirty: false},
+			},
+		},
+	}
+
+	output := formatter.FormatListResponse(envs, true)
+
+	if !contains(output, "main: dirty") {
+		t.Fatalf("expected main project dirty status, got %q", output)
+	}
+}
+
+func TestFormatInfoResponse_Text_ShowsMainProjectDirty(t *testing.T) {
+	formatter := New("text")
+	env := &core.WorktreeEnv{
+		Name: "feature-main-dirty",
+		MainProject: &core.ModuleStatus{
+			Name:    "main",
+			Path:    "/path/to/main",
+			IsDirty: true,
+			Branch:  "feature-main-dirty",
+		},
+	}
+
+	output := formatter.FormatInfoResponse(env)
+
+	if !contains(output, "Main Project") || !contains(output, "dirty") {
+		t.Fatalf("expected main project dirty status in info output, got %q", output)
 	}
 }
 
