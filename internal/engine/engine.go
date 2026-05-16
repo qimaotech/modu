@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -678,6 +679,44 @@ func (e *Engine) GetMainProject(ctx context.Context) (*MainProjectStatus, error)
 		IsDirty: status.IsDirty,
 		Branch:  status.Branch,
 	}, nil
+}
+
+// ListCreateBaseBranches 返回创建 feature 时可选择的基准分支，默认分支始终排在第一位。
+func (e *Engine) ListCreateBaseBranches(ctx context.Context) ([]string, error) {
+	if e.Config == nil {
+		return nil, nil
+	}
+	defaultBase := strings.TrimSpace(e.Config.DefaultBase)
+	branches := []string{}
+	if defaultBase != "" {
+		branches = append(branches, defaultBase)
+	}
+	if e.GitProxy == nil {
+		return branches, nil
+	}
+
+	listedBranches, err := e.GitProxy.ListBranches(ctx, e.Config.Workspace)
+	if err != nil {
+		return branches, err
+	}
+	sort.Strings(listedBranches)
+	for _, branch := range listedBranches {
+		branches = appendUniqueBaseBranch(branches, branch)
+	}
+	return branches, nil
+}
+
+func appendUniqueBaseBranch(branches []string, branch string) []string {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return branches
+	}
+	for _, existing := range branches {
+		if existing == branch {
+			return branches
+		}
+	}
+	return append(branches, branch)
 }
 
 // GetMainProjectModules 获取主项目及其所有模块的分支状态

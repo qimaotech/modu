@@ -169,6 +169,60 @@ func (g *GitProxy) ListWorktrees(ctx context.Context, repoPath string) ([]Worktr
 	return parseWorktreeList(string(out))
 }
 
+// ListBranches 列出仓库本地分支和 origin 远端分支，供 TUI 创建时选择基准分支。
+func (g *GitProxy) ListBranches(ctx context.Context, repoPath string) ([]string, error) {
+	localBranches, err := gitBranchRefs(ctx, repoPath, "refs/heads")
+	if err != nil {
+		return nil, err
+	}
+	remoteBranches, err := gitBranchRefs(ctx, repoPath, "refs/remotes/origin")
+	if err != nil {
+		return nil, err
+	}
+
+	localSet := make(map[string]bool, len(localBranches))
+	branches := make([]string, 0, len(localBranches)+len(remoteBranches))
+	for _, branch := range localBranches {
+		branches = appendUniqueBranch(branches, branch)
+		localSet[branch] = true
+	}
+	for _, branch := range remoteBranches {
+		if branch == "origin/HEAD" {
+			continue
+		}
+		if localName, ok := strings.CutPrefix(branch, "origin/"); ok && localSet[localName] {
+			continue
+		}
+		branches = appendUniqueBranch(branches, branch)
+	}
+	return branches, nil
+}
+
+func gitBranchRefs(ctx context.Context, repoPath, refPrefix string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "for-each-ref", "--format=%(refname:short)", refPrefix)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("[git for-each-ref] failed to list branches in %s: %w, output: %s", repoPath, errors.ErrGitExec, string(out))
+	}
+	var branches []string
+	for _, line := range strings.Split(string(out), "\n") {
+		branches = appendUniqueBranch(branches, strings.TrimSpace(line))
+	}
+	return branches, nil
+}
+
+func appendUniqueBranch(branches []string, branch string) []string {
+	if branch == "" {
+		return branches
+	}
+	for _, existing := range branches {
+		if existing == branch {
+			return branches
+		}
+	}
+	return append(branches, branch)
+}
+
 // Fetch 从远程获取最新
 func (g *GitProxy) Fetch(ctx context.Context, repoPath string) error {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "fetch", "--all")

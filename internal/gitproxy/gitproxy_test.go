@@ -312,6 +312,39 @@ func TestGetBranchPushStatus_MissingRemoteBranch(t *testing.T) {
 	}
 }
 
+func TestListBranches_LocalAndRemote(t *testing.T) {
+	repoPath := setupPushStatusRepo(t, "develop")
+	runGit(t, repoPath, "branch", "main")
+	runGit(t, repoPath, "push", "origin", "develop:refs/heads/release/remote-only")
+
+	g := &GitProxy{}
+	branches, err := g.ListBranches(context.Background(), repoPath)
+	if err != nil {
+		t.Fatalf("ListBranches() unexpected error: %v", err)
+	}
+
+	for _, want := range []string{"develop", "main", "origin/release/remote-only"} {
+		if !containsBranch(branches, want) {
+			t.Fatalf("ListBranches() = %v，缺少 %s", branches, want)
+		}
+	}
+	if containsBranch(branches, "origin/develop") {
+		t.Fatalf("ListBranches() = %v，不应返回已有本地分支的 origin/develop", branches)
+	}
+	if containsBranch(branches, "origin/HEAD") {
+		t.Fatalf("ListBranches() = %v，不应返回 origin/HEAD", branches)
+	}
+}
+
+func containsBranch(branches []string, branch string) bool {
+	for _, candidate := range branches {
+		if candidate == branch {
+			return true
+		}
+	}
+	return false
+}
+
 func setupPushStatusRepo(t *testing.T, branch string) string {
 	t.Helper()
 

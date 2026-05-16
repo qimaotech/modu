@@ -87,7 +87,7 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		Run:   runCreate,
 	}
-	createCmd.Flags().String("base", "develop", "基准分支")
+	createCmd.Flags().String("base", "", "基准分支（默认使用配置 default-base）")
 	createCmd.Flags().StringSlice("modules", nil, "指定要创建的模块（逗号分隔），默认创建所有模块")
 
 	// delete 命令
@@ -267,10 +267,11 @@ func loadConfig() *engine.Engine {
 
 func runCreate(cmd *cobra.Command, args []string) {
 	feature := args[0]
-	base, _ := cmd.Flags().GetString("base")
+	baseFlag, _ := cmd.Flags().GetString("base")
 	modules, _ := cmd.Flags().GetStringSlice("modules")
 
 	eng := loadConfig()
+	base := resolveCreateBaseBranch(baseFlag, eng.Config.DefaultBase)
 
 	// 检查 feature 是否已存在
 	featurePath := filepath.Join(eng.Config.WorktreeRoot, feature)
@@ -403,6 +404,14 @@ func runCreate(cmd *cobra.Command, args []string) {
 	}
 
 	fmt.Print(formatter.FormatCreateResponse(feature, []output.Result{}, nil))
+}
+
+// resolveCreateBaseBranch 返回 create 命令本次使用的基准分支。
+func resolveCreateBaseBranch(explicitBase, defaultBase string) string {
+	if strings.TrimSpace(explicitBase) != "" {
+		return strings.TrimSpace(explicitBase)
+	}
+	return defaultBase
 }
 
 func runDelete(cmd *cobra.Command, args []string) {

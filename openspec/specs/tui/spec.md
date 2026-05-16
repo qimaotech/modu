@@ -169,11 +169,34 @@ The TUI SHALL let users enter and edit the feature name with cursor movement bef
 - **WHEN** the user presses Esc or Ctrl+C in the feature-name input state
 - **THEN** the TUI cancels creation and returns to the list view without creating a worktree
 
-### Requirement: Project selection before creation
-The TUI SHALL provide a project/module selection step after the user confirms a feature name and before any worktree creation starts.
+### Requirement: Base branch selection before creation
+The TUI SHALL let users select or confirm the base branch after entering a feature name and before selecting projects/modules.
 
-#### Scenario: Open selection after valid name
-- **WHEN** the user enters a non-empty feature name and presses Enter
+#### Scenario: Default base is preselected
+- **WHEN** the user enters a valid feature name and presses Enter
+- **THEN** the TUI displays a base-branch selection list with `.modu.yaml` `default-base` preselected
+
+#### Scenario: Available branches are selectable
+- **WHEN** the user presses Up/Down or k/j in the base-branch selection state
+- **THEN** the TUI moves the highlighted base branch without leaving the base-branch selection state
+
+#### Scenario: Branch list failure falls back to default
+- **WHEN** the TUI cannot read the workspace branch list
+- **THEN** the TUI still offers `.modu.yaml` `default-base` as the selectable base branch and shows a Chinese warning
+
+#### Scenario: Base selection advances to modules
+- **WHEN** the user confirms the highlighted base branch in the base-branch selection state
+- **THEN** the TUI displays the project/module selection step
+
+#### Scenario: Cancel base selection
+- **WHEN** the user presses Esc or Ctrl+C in the base-branch selection state
+- **THEN** the TUI cancels creation and returns to the list view without creating a worktree
+
+### Requirement: Project selection before creation
+The TUI SHALL provide a project/module selection step after the user confirms a feature name and base branch and before any worktree creation starts.
+
+#### Scenario: Open selection after valid name and base
+- **WHEN** the user enters a non-empty feature name, confirms a non-empty base branch, and presses Enter
 - **THEN** the TUI displays a selection view for configured projects/modules before creating the feature
 
 #### Scenario: Main project is included
@@ -193,15 +216,19 @@ The TUI SHALL provide a project/module selection step after the user confirms a 
 - **THEN** the TUI returns to the list view without creating a worktree
 
 ### Requirement: Create feature from TUI selection
-The TUI SHALL create the feature worktree after the user confirms project/module selection.
+The TUI SHALL create the feature worktree from the confirmed base branch after the user confirms project/module selection.
 
 #### Scenario: Create selected projects
-- **WHEN** the user confirms project/module selection for a feature name
-- **THEN** the TUI creates the main project worktree and only the selected module worktrees
+- **WHEN** the user confirms project/module selection for a feature name and base branch
+- **THEN** the TUI creates the main project worktree from the confirmed base branch and only the selected module worktrees
 
 #### Scenario: Create with no selected modules
 - **WHEN** the user confirms creation with no modules selected
-- **THEN** the TUI creates the main project feature worktree without module worktrees
+- **THEN** the TUI creates the main project feature worktree from the confirmed base branch without module worktrees
+
+#### Scenario: Module base branch still wins
+- **WHEN** the user confirms creation with a selected module that configures `base-branch`
+- **THEN** that module is created from its configured `base-branch`
 
 #### Scenario: Creation success feedback
 - **WHEN** feature creation succeeds

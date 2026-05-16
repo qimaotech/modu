@@ -25,6 +25,7 @@ type MockGitClient struct {
 	RemoveWorktreeFunc                   func(ctx context.Context, path string) error
 	RemoveWorktreeAndBranchFunc          func(ctx context.Context, repoPath, worktreePath, featureDirName string) error
 	ListWorktreesFunc                    func(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error)
+	ListBranchesFunc                     func(ctx context.Context, repoPath string) ([]string, error)
 	FetchFunc                            func(ctx context.Context, repoPath string) error
 	RebaseFunc                           func(ctx context.Context, path string) error
 	FetchAndSwitchBranchFunc             func(ctx context.Context, repoPath, branch string) error
@@ -74,6 +75,13 @@ func (m *MockGitClient) RemoveWorktreeAndBranch(ctx context.Context, repoPath, w
 func (m *MockGitClient) ListWorktrees(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error) {
 	if m.ListWorktreesFunc != nil {
 		return m.ListWorktreesFunc(ctx, repoPath)
+	}
+	return nil, nil
+}
+
+func (m *MockGitClient) ListBranches(ctx context.Context, repoPath string) ([]string, error) {
+	if m.ListBranchesFunc != nil {
+		return m.ListBranchesFunc(ctx, repoPath)
 	}
 	return nil, nil
 }
@@ -380,6 +388,83 @@ func TestCreateWorktree_CreateNewBranchWhenNotExists(t *testing.T) {
 
 	if !createNewBranchCalled {
 		t.Error("expected CreateWorktree to be called when branch does not exist")
+	}
+}
+
+func TestCreateWorktree_ModuleBaseBranchOverridesSelectedBase(t *testing.T) {
+	cfg := &config.Config{
+		Workspace:    filepath.Join(t.TempDir(), "workspace"),
+		WorktreeRoot: filepath.Join(t.TempDir(), "worktrees"),
+		Concurrency:  2,
+		Modules: []config.Module{
+			{Name: "module1", URL: "git@github.com:test/module1.git", BaseBranch: "release/module"},
+		},
+	}
+
+	createdBases := make(map[string]string)
+	mock := &MockGitClient{
+		BranchExistsFunc: func(ctx context.Context, repoPath, branch string) bool {
+			return false
+		},
+		CreateWorktreeFunc: func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+			createdBases[filepath.Base(worktreePath)] = baseBranch
+			return nil
+		},
+	}
+
+	engine := NewWithClient(cfg, mock)
+	if err := engine.CreateWorktree(context.Background(), "test-feature", "main"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := createdBases["test-feature"]; got != "main" {
+		t.Fatalf("主项目 base = %q，期望 main", got)
+	}
+	if got := createdBases["module1"]; got != "release/module" {
+		t.Fatalf("module base = %q，期望 release/module", got)
+	}
+}
+
+func TestListCreateBaseBranches_DefaultFirstAndDeduped(t *testing.T) {
+	cfg := &config.Config{
+		Workspace:   "/tmp/test-workspace",
+		DefaultBase: "develop",
+	}
+	mock := &MockGitClient{
+		ListBranchesFunc: func(ctx context.Context, repoPath string) ([]string, error) {
+			return []string{"main", "develop", "release/1.2", "main"}, nil
+		},
+	}
+
+	engine := NewWithClient(cfg, mock)
+	got, err := engine.ListCreateBaseBranches(context.Background())
+	if err != nil {
+		t.Fatalf("ListCreateBaseBranches unexpected error: %v", err)
+	}
+	want := []string{"develop", "main", "release/1.2"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("ListCreateBaseBranches = %v，期望 %v", got, want)
+	}
+}
+
+func TestListCreateBaseBranches_FallbackDefaultOnListError(t *testing.T) {
+	cfg := &config.Config{
+		Workspace:   "/tmp/test-workspace",
+		DefaultBase: "develop",
+	}
+	mock := &MockGitClient{
+		ListBranchesFunc: func(ctx context.Context, repoPath string) ([]string, error) {
+			return nil, errors.New("list failed")
+		},
+	}
+
+	engine := NewWithClient(cfg, mock)
+	got, err := engine.ListCreateBaseBranches(context.Background())
+	if err == nil {
+		t.Fatal("expected list error")
+	}
+	if len(got) != 1 || got[0] != "develop" {
+		t.Fatalf("fallback branches = %v，期望 [develop]", got)
 	}
 }
 

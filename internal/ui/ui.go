@@ -65,6 +65,7 @@ var (
 	ErrFeatureWithoutMainProject = errors.New("该 feature 无主项目，无法复制路径")
 	ErrFeatureCannotOpen         = errors.New("该 feature 无主项目，无法打开")
 	ErrFeatureNotFound           = errors.New("未找到 feature")
+	ErrTUIEngineNotInitialized   = errors.New("TUI 引擎未初始化")
 )
 
 var (
@@ -141,7 +142,7 @@ type App struct {
 	mainProject      *engine.MainProjectStatus
 	selected         int
 	menuSelected     int    // 操作菜单选中项
-	state            string // "loading", "list", "menu", "modules", "confirm", "confirm_unpushed", "error"
+	state            string // "loading", "list", "menu", "modules", "create_input", "create_base", "create_modules", "confirm", "confirm_unpushed", "error"
 	feature          string
 	err              error
 	message          string
@@ -155,10 +156,14 @@ type App struct {
 	modulesFeature    string          // 当前操作的 feature 名称
 	isMainProjectMenu bool            // 当前菜单是否为主项目菜单
 	// 创建 feature 相关字段
-	createFeatureInput  []rune // feature 名称输入内容
-	createFeatureCursor int    // feature 名称输入光标
-	createFeatureError  string // feature 名称输入校验提示
-	createFeature       string // 当前待创建的 feature 名称
+	createFeatureInput  []rune   // feature 名称输入内容
+	createFeatureCursor int      // feature 名称输入光标
+	createFeatureError  string   // feature 名称输入校验提示
+	createFeature       string   // 当前待创建的 feature 名称
+	createBaseOptions   []string // 可选择的基准分支列表
+	createBaseCursor    int      // 基准分支列表光标
+	createBaseError     string   // 基准分支选择提示
+	createBase          string   // 当前待创建 feature 的基准分支
 }
 
 // New 创建 TUI App
@@ -259,6 +264,8 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleModulesKey(msg)
 		case "create_input":
 			return m.handleCreateInputKey(msg)
+		case "create_base":
+			return m.handleCreateBaseKey(msg)
 		case "create_modules":
 			return m.handleCreateModulesKey(msg)
 		case "confirm":
@@ -714,6 +721,10 @@ func (m *App) startCreateFeature() {
 	m.createFeatureCursor = 0
 	m.createFeatureError = ""
 	m.createFeature = ""
+	m.createBaseOptions = nil
+	m.createBaseCursor = 0
+	m.createBaseError = ""
+	m.createBase = ""
 	m.moduleSelector = nil
 	m.moduleCursor = 0
 }
@@ -723,6 +734,10 @@ func (m *App) resetCreateFeature() {
 	m.createFeatureCursor = 0
 	m.createFeatureError = ""
 	m.createFeature = ""
+	m.createBaseOptions = nil
+	m.createBaseCursor = 0
+	m.createBaseError = ""
+	m.createBase = ""
 	m.moduleSelector = nil
 	m.moduleCursor = 0
 }
@@ -746,8 +761,8 @@ func (m *App) handleCreateInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.createFeature = feature
 		m.createFeatureError = ""
-		m.initCreateModuleSelector()
-		m.state = "create_modules"
+		m.initCreateBaseOptions()
+		m.state = "create_base"
 	case "left":
 		if m.createFeatureCursor > 0 {
 			m.createFeatureCursor--
@@ -785,12 +800,106 @@ func (m *App) handleCreateInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// initCreateBaseOptions 使用主项目分支列表初始化创建流程中的基准分支选项。
+func (m *App) initCreateBaseOptions() {
+	base := ""
+	if m.Engine != nil && m.Engine.Config != nil {
+		base = strings.TrimSpace(m.Engine.Config.DefaultBase)
+	}
+
+	options := []string{}
+	var err error
+	if m.Engine != nil {
+		options, err = m.Engine.ListCreateBaseBranches(context.Background())
+	}
+	if len(options) == 0 && base != "" {
+		options = []string{base}
+	}
+	if err != nil {
+		m.createBaseError = "读取分支列表失败，已使用默认分支"
+	} else {
+		m.createBaseError = ""
+	}
+	m.createBaseOptions = options
+	m.createBaseCursor = 0
+	for i, branch := range m.createBaseOptions {
+		if branch == base {
+			m.createBaseCursor = i
+			break
+		}
+	}
+	m.createBase = base
+}
+
+func (m *App) selectedCreateBase() string {
+	if len(m.createBaseOptions) == 0 {
+		return ""
+	}
+	m.clampCreateBaseCursor()
+	return strings.TrimSpace(m.createBaseOptions[m.createBaseCursor])
+}
+
+func (m *App) defaultCreateBase() string {
+	if m.Engine != nil && m.Engine.Config != nil {
+		return strings.TrimSpace(m.Engine.Config.DefaultBase)
+	}
+	return ""
+}
+
 func (m *App) clampCreateFeatureCursor() {
 	if m.createFeatureCursor < 0 {
 		m.createFeatureCursor = 0
 	}
 	if m.createFeatureCursor > len(m.createFeatureInput) {
 		m.createFeatureCursor = len(m.createFeatureInput)
+	}
+}
+
+// handleCreateBaseKey 处理创建 feature 时的基准分支选择/确认。
+func (m *App) handleCreateBaseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.clampCreateBaseCursor()
+
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.cancelCreateFeature()
+	case "enter":
+		base := m.selectedCreateBase()
+		if base == "" {
+			m.createBaseError = "请选择基准分支"
+			return m, nil
+		}
+		m.createBase = base
+		m.createBaseError = ""
+		m.initCreateModuleSelector()
+		m.state = "create_modules"
+	case "up", "k":
+		if m.createBaseCursor > 0 {
+			m.createBaseCursor--
+		}
+	case "down", "j":
+		if m.createBaseCursor < len(m.createBaseOptions)-1 {
+			m.createBaseCursor++
+		}
+	case "home":
+		m.createBaseCursor = 0
+	case "end":
+		if len(m.createBaseOptions) > 0 {
+			m.createBaseCursor = len(m.createBaseOptions) - 1
+		}
+	}
+	return m, nil
+}
+
+// clampCreateBaseCursor 将基准分支列表光标限制在合法范围内。
+func (m *App) clampCreateBaseCursor() {
+	if m.createBaseCursor < 0 {
+		m.createBaseCursor = 0
+	}
+	if m.createBaseCursor >= len(m.createBaseOptions) && len(m.createBaseOptions) > 0 {
+		m.createBaseCursor = len(m.createBaseOptions) - 1
+	}
+	if len(m.createBaseOptions) == 0 {
+		m.createBaseCursor = 0
 	}
 }
 
@@ -854,6 +963,7 @@ func (m *App) executeUpdateWorktree(feature string) tea.Cmd {
 
 func (m *App) executeCreateFeature() tea.Cmd {
 	feature := m.createFeature
+	createBase := strings.TrimSpace(m.createBase)
 	var selectedModules []config.Module
 	if m.moduleSelector != nil {
 		selectedModules = m.moduleSelector.SelectedModules()
@@ -861,13 +971,17 @@ func (m *App) executeCreateFeature() tea.Cmd {
 
 	return func() tea.Msg {
 		if m.Engine == nil || m.Engine.Config == nil || m.Engine.GitProxy == nil {
-			return createFeatureDoneMsg{feature: feature, err: errors.New("TUI 引擎未初始化")}
+			return createFeatureDoneMsg{feature: feature, err: ErrTUIEngineNotInitialized}
 		}
 
 		createCfg := *m.Engine.Config
 		createCfg.Modules = append([]config.Module(nil), selectedModules...)
+		selectedBase := createBase
+		if selectedBase == "" {
+			selectedBase = createCfg.DefaultBase
+		}
 		createEngine := engine.NewWithClient(&createCfg, m.Engine.GitProxy)
-		if err := createEngine.CreateWorktree(context.Background(), feature, createCfg.DefaultBase); err != nil {
+		if err := createEngine.CreateWorktree(context.Background(), feature, selectedBase); err != nil {
 			return createFeatureDoneMsg{feature: feature, err: err}
 		}
 		return createFeatureDoneMsg{feature: feature}
@@ -948,6 +1062,8 @@ func (m *App) View() string {
 		return m.renderModules()
 	case "create_input":
 		return m.renderCreateInput()
+	case "create_base":
+		return m.renderCreateBase()
 	case "create_modules":
 		return m.renderCreateModules()
 	case "confirm":
@@ -1166,11 +1282,49 @@ func (m *App) renderCreateFeatureInputValue() string {
 	return before + "▌" + after
 }
 
-func (m *App) renderCreateModules() string {
+// renderCreateBase 渲染创建 feature 的基准分支选择/确认界面。
+func (m *App) renderCreateBase() string {
 	var s strings.Builder
 	s.WriteString(headerStyle.Render("新建 feature"))
 	s.WriteString("\n\n")
 	s.WriteString(fmt.Sprintf("当前 feature: %s\n\n", m.createFeature))
+	s.WriteString("请选择/确认基准分支:\n\n")
+
+	defaultBase := m.defaultCreateBase()
+	for i, branch := range m.createBaseOptions {
+		prefix := "  "
+		if i == m.createBaseCursor {
+			prefix = "→ "
+		}
+		suffix := ""
+		if branch == defaultBase {
+			suffix = " (default-base)"
+		}
+		line := prefix + branch + suffix
+		if i == m.createBaseCursor {
+			s.WriteString(selectedItemStyle.Render(line))
+		} else {
+			s.WriteString(itemStyle.Render(line))
+		}
+		s.WriteString("\n")
+	}
+	if m.createBaseError != "" {
+		s.WriteString("\n")
+		s.WriteString(errorStyle.Render(m.createBaseError))
+		s.WriteString("\n\n")
+	} else {
+		s.WriteString("\n")
+	}
+	s.WriteString(itemStyle.Render("↑/↓ 选择，Enter 确认，Esc/Ctrl+C 取消"))
+	return s.String()
+}
+
+func (m *App) renderCreateModules() string {
+	var s strings.Builder
+	s.WriteString(headerStyle.Render("新建 feature"))
+	s.WriteString("\n\n")
+	s.WriteString(fmt.Sprintf("当前 feature: %s\n", m.createFeature))
+	s.WriteString(fmt.Sprintf("基准分支: %s\n\n", m.createBase))
 	s.WriteString(successStyle.Render(fmt.Sprintf("[x] 主项目: %s（始终创建）", m.createMainProjectName())))
 	s.WriteString("\n")
 

@@ -198,6 +198,43 @@ func TestRunCreate_FilterExistingModules(t *testing.T) {
 	})
 }
 
+func TestResolveCreateBaseBranch(t *testing.T) {
+	tests := []struct {
+		name         string
+		explicitBase string
+		defaultBase  string
+		want         string
+	}{
+		{
+			name:         "使用配置默认分支",
+			explicitBase: "",
+			defaultBase:  "release/1.2",
+			want:         "release/1.2",
+		},
+		{
+			name:         "显式参数覆盖配置",
+			explicitBase: "main",
+			defaultBase:  "develop",
+			want:         "main",
+		},
+		{
+			name:         "显式参数去除空白",
+			explicitBase: "  hotfix/base  ",
+			defaultBase:  "develop",
+			want:         "hotfix/base",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveCreateBaseBranch(tt.explicitBase, tt.defaultBase)
+			if got != tt.want {
+				t.Fatalf("resolveCreateBaseBranch() = %q，期望 %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // 辅助函数和测试用结构体
 type testConfig struct {
 	Workspace    string

@@ -18,6 +18,8 @@ type GitClient interface {
 	RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktreePath, featureDirName string) error
 	// ListWorktrees 列出所有工作树
 	ListWorktrees(ctx context.Context, repoPath string) ([]WorktreeInfo, error)
+	// ListBranches 列出仓库可作为基准分支选择的本地和 origin 远端分支
+	ListBranches(ctx context.Context, repoPath string) ([]string, error)
 	// Fetch 从远程获取最新
 	Fetch(ctx context.Context, repoPath string) error
 	// Rebase 在当前路径下执行 git rebase origin/<当前分支>

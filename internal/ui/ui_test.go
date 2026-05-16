@@ -851,8 +851,68 @@ func TestApp_CreateInput_Cancel(t *testing.T) {
 	}
 }
 
-// TestApp_CreateInput_ValidNameInitializesSelection 有效名称进入项目选择并应用默认/远程预选
-func TestApp_CreateInput_ValidNameInitializesSelection(t *testing.T) {
+// TestApp_CreateInput_ValidNameInitializesBaseOptions 有效名称后进入基准分支选择列表
+func TestApp_CreateInput_ValidNameInitializesBaseOptions(t *testing.T) {
+	app := &App{
+		Engine: engine.NewWithClient(&config.Config{
+			Workspace:    t.TempDir(),
+			WorktreeRoot: t.TempDir(),
+			DefaultBase:  "develop",
+		}, &uiFakeGitClient{branches: []string{"main", "release/1.2", "develop"}}),
+		state:               "create_input",
+		createFeatureInput:  []rune("feat-a"),
+		createFeatureCursor: len("feat-a"),
+	}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("初始化基准分支不应返回命令")
+	}
+	if app.state != "create_base" {
+		t.Fatalf("有效名称后 state = %q，期望 create_base", app.state)
+	}
+	if app.createFeature != "feat-a" {
+		t.Fatalf("createFeature = %q，期望 feat-a", app.createFeature)
+	}
+	wantOptions := []string{"develop", "main", "release/1.2"}
+	if strings.Join(app.createBaseOptions, ",") != strings.Join(wantOptions, ",") {
+		t.Fatalf("createBaseOptions = %v，期望 %v", app.createBaseOptions, wantOptions)
+	}
+	if app.createBaseCursor != 0 {
+		t.Fatalf("createBaseCursor = %d，期望 0", app.createBaseCursor)
+	}
+}
+
+// TestApp_CreateInput_BaseOptionsFallbackWhenListFails 分支列表读取失败时仍可选择默认基准分支
+func TestApp_CreateInput_BaseOptionsFallbackWhenListFails(t *testing.T) {
+	app := &App{
+		Engine: engine.NewWithClient(&config.Config{
+			Workspace:    t.TempDir(),
+			WorktreeRoot: t.TempDir(),
+			DefaultBase:  "develop",
+		}, &uiFakeGitClient{listBranchesErr: os.ErrInvalid}),
+		state:               "create_input",
+		createFeatureInput:  []rune("feat-a"),
+		createFeatureCursor: len("feat-a"),
+	}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("初始化基准分支不应返回命令")
+	}
+	if app.state != "create_base" {
+		t.Fatalf("有效名称后 state = %q，期望 create_base", app.state)
+	}
+	if len(app.createBaseOptions) != 1 || app.createBaseOptions[0] != "develop" {
+		t.Fatalf("createBaseOptions = %v，期望 [develop]", app.createBaseOptions)
+	}
+	if app.createBaseError == "" {
+		t.Fatal("分支列表读取失败时应展示中文提示")
+	}
+}
+
+// TestApp_CreateBase_ConfirmInitializesSelection 选择/确认基准分支后进入项目选择并应用默认/远程预选
+func TestApp_CreateBase_ConfirmInitializesSelection(t *testing.T) {
 	fake := &uiFakeGitClient{remoteBranches: map[string]bool{"git@example.com:m2.git|feat-a": true}}
 	app := &App{
 		Engine: engine.NewWithClient(&config.Config{
@@ -867,9 +927,10 @@ func TestApp_CreateInput_ValidNameInitializesSelection(t *testing.T) {
 			},
 			Concurrency: 2,
 		}, fake),
-		state:               "create_input",
-		createFeatureInput:  []rune("feat-a"),
-		createFeatureCursor: len("feat-a"),
+		state:             "create_base",
+		createFeature:     "feat-a",
+		createBaseOptions: []string{"develop", "main", "release/1.2"},
+		createBaseCursor:  2,
 	}
 
 	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -882,11 +943,60 @@ func TestApp_CreateInput_ValidNameInitializesSelection(t *testing.T) {
 	if app.createFeature != "feat-a" {
 		t.Fatalf("createFeature = %q，期望 feat-a", app.createFeature)
 	}
+	if app.createBase != "release/1.2" {
+		t.Fatalf("createBase = %q，期望 release/1.2", app.createBase)
+	}
 	if app.moduleSelector == nil {
 		t.Fatal("moduleSelector 不应为空")
 	}
 	if !app.moduleSelector.selected[0] || !app.moduleSelector.selected[1] || app.moduleSelector.selected[2] {
 		t.Fatalf("期望 m1 默认选中、m2 远程选中、m3 未选中，got %v", app.moduleSelector.selected)
+	}
+}
+
+// TestApp_CreateBase_Navigation 支持上下选择基准分支
+func TestApp_CreateBase_Navigation(t *testing.T) {
+	app := &App{state: "create_base", createBaseOptions: []string{"develop", "main", "release/1.2"}}
+
+	app.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if app.createBaseCursor != 1 {
+		t.Fatalf("down 后 cursor = %d，期望 1", app.createBaseCursor)
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if app.createBaseCursor != 2 {
+		t.Fatalf("j 后 cursor = %d，期望 2", app.createBaseCursor)
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if app.createBaseCursor != 1 {
+		t.Fatalf("up 后 cursor = %d，期望 1", app.createBaseCursor)
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	if app.createBaseCursor != 2 {
+		t.Fatalf("end 后 cursor = %d，期望 2", app.createBaseCursor)
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyHome})
+	if app.createBaseCursor != 0 {
+		t.Fatalf("home 后 cursor = %d，期望 0", app.createBaseCursor)
+	}
+}
+
+// TestApp_CreateBase_NoOptionValidationAndCancel 无可选分支阻止继续，Esc 取消创建
+func TestApp_CreateBase_NoOptionValidationAndCancel(t *testing.T) {
+	app := &App{state: "create_base"}
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("空基准分支不应返回命令")
+	}
+	if app.state != "create_base" {
+		t.Fatalf("空基准分支后 state = %q，期望 create_base", app.state)
+	}
+	if app.createBaseError == "" {
+		t.Fatal("无可选分支应设置中文校验提示")
+	}
+
+	app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if app.state != "list" {
+		t.Fatalf("Esc 后 state = %q，期望 list", app.state)
 	}
 }
 
@@ -926,7 +1036,7 @@ func TestApp_CreateModules_ConfirmCreatesSelectedModules(t *testing.T) {
 	if len(fake.createWorktreeCalls) != 2 {
 		t.Fatalf("期望创建主项目和 m1 两个 worktree，got %d: %v", len(fake.createWorktreeCalls), fake.createWorktreeCalls)
 	}
-	if fake.createWorktreeCalls[0].branch != "feat-a" || fake.createWorktreeCalls[0].baseBranch != "develop" {
+	if fake.createWorktreeCalls[0].branch != "feat-a" || fake.createWorktreeCalls[0].baseBranch != "release/1.2" {
 		t.Fatalf("主项目创建参数不正确: %+v", fake.createWorktreeCalls[0])
 	}
 	if fake.createWorktreeCalls[1].repoPath != filepath.Join(app.Engine.Config.Workspace, "m1") {
@@ -1017,6 +1127,7 @@ func newCreateFeatureTestApp(t *testing.T) (*App, *uiFakeGitClient) {
 		Engine:         engine.NewWithClient(cfg, fake),
 		state:          "create_modules",
 		createFeature:  "feat-a",
+		createBase:     "release/1.2",
 		moduleSelector: NewModuleSelector(cfg.Modules, nil, nil, nil, ""),
 	}
 	return app, fake
@@ -1080,6 +1191,8 @@ type uiFakeCreateWorktreeCall struct {
 type uiFakeGitClient struct {
 	remoteBranches      map[string]bool
 	pushStatuses        map[string]gitproxy.BranchPushStatus
+	branches            []string
+	listBranchesErr     error
 	createWorktreeCalls []uiFakeCreateWorktreeCall
 	removeCalls         int
 }
@@ -1113,6 +1226,13 @@ func (f *uiFakeGitClient) RemoveWorktreeAndBranch(ctx context.Context, repoPath,
 
 func (f *uiFakeGitClient) ListWorktrees(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error) {
 	return nil, nil
+}
+
+func (f *uiFakeGitClient) ListBranches(ctx context.Context, repoPath string) ([]string, error) {
+	if f.listBranchesErr != nil {
+		return nil, f.listBranchesErr
+	}
+	return append([]string(nil), f.branches...), nil
 }
 
 func (f *uiFakeGitClient) Fetch(ctx context.Context, repoPath string) error {

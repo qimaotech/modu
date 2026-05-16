@@ -2,9 +2,9 @@
 
 **版本**: 2.4 | **来源**: docs/plans/2026-03-06-modu-design-v2.4.md + 代码提交
 
-## 目的
+## Purpose
 
-定义 modu 所有 CLI 子命令、参数及行为约定。
+定义 modu 所有 CLI 子命令、参数及行为约定，确保命令入口、配置默认值、分支基准和错误输出在不同执行路径中保持一致。
 
 ## 入口
 
@@ -58,6 +58,24 @@ The `modu delete` command SHALL check whether local branches that would be delet
 #### Scenario: Force does not bypass unpushed protection
 - **WHEN** the user runs `modu delete <feature> --force` and at least one branch that would be deleted is not fully pushed
 - **THEN** the command fails with `ERR_UNPUSHED_BRANCH` unless `--allow-unpushed` is also provided
+
+### Requirement: Create uses configured default base
+The CLI SHALL use the loaded configuration `default-base` as the base branch for `modu create <feature>` when the user does not provide `--base`.
+
+#### Scenario: Create without base flag
+- **WHEN** the user runs `modu create feature/foo` and `.modu.yaml` contains `default-base: release/1.2`
+- **THEN** the system creates the main project worktree from `release/1.2`
+- **AND** modules without module-level `base-branch` are created from `release/1.2`
+
+#### Scenario: Create with explicit base flag
+- **WHEN** the user runs `modu create feature/foo --base main` and `.modu.yaml` contains `default-base: develop`
+- **THEN** the system creates the main project worktree from `main`
+- **AND** modules without module-level `base-branch` are created from `main`
+
+#### Scenario: Module base branch still wins
+- **WHEN** the user runs `modu create feature/foo --base main`
+- **AND** a selected module has `base-branch: release/module`
+- **THEN** that module worktree is created from `release/module`
 
 ## 与代码的对应
 

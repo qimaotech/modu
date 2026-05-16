@@ -123,10 +123,11 @@ modu init
 modu init --scan  # 自动扫描并添加模块
 
 # 创建 feature 分支
-modu create my-feature
-modu create my-feature --base main
+modu create my-feature              # 默认基于 .modu.yaml 的 default-base
+modu create my-feature --base main  # 临时指定基准分支
 modu create my-feature --modules frontend,backend  # 只创建指定模块
 # 创建时会自动查询远端分支状态，预先选中已有该分支的模块
+# TUI 中按 n 新建 feature 时，也会先从分支列表选择/确认基准分支再选择模块
 
 # 列出所有 worktree
 modu list
