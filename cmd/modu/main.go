@@ -12,6 +12,7 @@ import (
 	"github.com/qimaotech/modu/internal/config"
 	"github.com/qimaotech/modu/internal/engine"
 	"github.com/qimaotech/modu/internal/errors"
+	"github.com/qimaotech/modu/internal/gitproxy"
 	"github.com/qimaotech/modu/internal/i18n"
 	"github.com/qimaotech/modu/internal/logger"
 	"github.com/qimaotech/modu/internal/output"
@@ -89,6 +90,7 @@ func main() {
 	}
 	createCmd.Flags().String("base", "develop", "基准分支")
 	createCmd.Flags().StringSlice("modules", nil, "指定要创建的模块（逗号分隔），默认创建所有模块")
+	createCmd.Flags().Bool("no-fetch", false, "跳过远程拉取，基于本地代码创建 feature")
 
 	// delete 命令
 	deleteCmd := &cobra.Command{
@@ -268,6 +270,7 @@ func runCreate(cmd *cobra.Command, args []string) {
 	feature := args[0]
 	base, _ := cmd.Flags().GetString("base")
 	modules, _ := cmd.Flags().GetStringSlice("modules")
+	noFetch, _ := cmd.Flags().GetBool("no-fetch")
 
 	eng := loadConfig()
 
@@ -395,13 +398,30 @@ func runCreate(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	err := eng.CreateWorktree(cmd.Context(), feature, base)
+	err := eng.CreateWorktreeWithOptions(cmd.Context(), feature, base, engine.CreateWorktreeOptions{
+		SkipFetch: createShouldSkipFetch(eng.Config, noFetch),
+	})
 	if err != nil {
-		fmt.Print(formatter.FormatError(errors.Code(err), err.Error(), nil))
+		fmt.Print(formatCreateError(err))
 		os.Exit(1)
 	}
 
 	fmt.Print(formatter.FormatCreateResponse(feature, []output.Result{}, nil))
+}
+
+// createShouldSkipFetch 判断本次 create 是否跳过远程拉取。
+func createShouldSkipFetch(cfg *config.Config, noFetch bool) bool {
+	return noFetch || (cfg != nil && !cfg.AutoFetch)
+}
+
+// formatCreateError 格式化 create 错误，并在 fetch 失败时追加本地创建提示。
+func formatCreateError(err error) string {
+	formatter := output.New(outputFmt)
+	message := err.Error()
+	if gitproxy.IsFetchError(err) {
+		message += "\n提示: 可使用 --no-fetch 跳过远程拉取，基于本地代码创建。"
+	}
+	return formatter.FormatError(errors.Code(err), message, nil)
 }
 
 func runDelete(cmd *cobra.Command, args []string) {

@@ -16,6 +16,7 @@ import (
 	"github.com/qimaotech/modu/internal/config"
 	"github.com/qimaotech/modu/internal/core"
 	"github.com/qimaotech/modu/internal/engine"
+	"github.com/qimaotech/modu/internal/gitproxy"
 )
 
 // 全局样式
@@ -238,6 +239,10 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case createFeatureDoneMsg:
 		if msg.err != nil {
 			m.err = msg.err
+			if gitproxy.IsFetchError(msg.err) && m.Engine != nil && m.Engine.Config != nil && m.Engine.Config.AutoFetch {
+				m.state = "create_local_retry"
+				return m, nil
+			}
 			m.state = "error"
 			return m, nil
 		}
@@ -260,6 +265,8 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleCreateInputKey(msg)
 		case "create_modules":
 			return m.handleCreateModulesKey(msg)
+		case "create_local_retry":
+			return m.handleCreateLocalRetryKey(msg)
 		case "confirm":
 			return m.handleConfirmKey(msg)
 		case "error":
@@ -802,6 +809,17 @@ func (m *App) handleCreateModulesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *App) handleCreateLocalRetryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "enter":
+		m.state = "loading"
+		return m, m.executeCreateFeatureWithOptions(true)
+	case "n", "esc", "ctrl+c":
+		m.state = "error"
+	}
+	return m, nil
+}
+
 // executeUpdateCode 执行主项目+模块更新，返回在后台运行并发送 updateDoneMsg 的 Cmd
 func (m *App) executeUpdateCode() tea.Cmd {
 	return func() tea.Msg {
@@ -819,6 +837,10 @@ func (m *App) executeUpdateWorktree(feature string) tea.Cmd {
 }
 
 func (m *App) executeCreateFeature() tea.Cmd {
+	return m.executeCreateFeatureWithOptions(false)
+}
+
+func (m *App) executeCreateFeatureWithOptions(skipFetch bool) tea.Cmd {
 	feature := m.createFeature
 	var selectedModules []config.Module
 	if m.moduleSelector != nil {
@@ -833,7 +855,9 @@ func (m *App) executeCreateFeature() tea.Cmd {
 		createCfg := *m.Engine.Config
 		createCfg.Modules = append([]config.Module(nil), selectedModules...)
 		createEngine := engine.NewWithClient(&createCfg, m.Engine.GitProxy)
-		if err := createEngine.CreateWorktree(context.Background(), feature, createCfg.DefaultBase); err != nil {
+		if err := createEngine.CreateWorktreeWithOptions(context.Background(), feature, createCfg.DefaultBase, engine.CreateWorktreeOptions{
+			SkipFetch: skipFetch || !createCfg.AutoFetch,
+		}); err != nil {
 			return createFeatureDoneMsg{feature: feature, err: err}
 		}
 		return createFeatureDoneMsg{feature: feature}
@@ -916,6 +940,8 @@ func (m *App) View() string {
 		return m.renderCreateInput()
 	case "create_modules":
 		return m.renderCreateModules()
+	case "create_local_retry":
+		return m.renderCreateLocalRetry()
 	case "confirm":
 		return m.renderConfirm()
 	case "error":
@@ -1160,6 +1186,18 @@ func (m *App) createMainProjectName() string {
 		return filepath.Base(m.Engine.Config.Workspace)
 	}
 	return "主项目"
+}
+
+func (m *App) renderCreateLocalRetry() string {
+	var s strings.Builder
+	s.WriteString(headerStyle.Render("新建 feature"))
+	s.WriteString("\n\n")
+	s.WriteString(errorStyle.Render(fmt.Sprintf("%v", m.err)))
+	s.WriteString("\n\n")
+	s.WriteString(itemStyle.Render("拉取远程失败。是否基于本地代码继续创建？后续推送可能与远端同名分支冲突。"))
+	s.WriteString("\n")
+	s.WriteString(itemStyle.Render("按 y 继续，n/esc 取消"))
+	return s.String()
 }
 
 func (m *App) renderError() string {

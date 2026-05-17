@@ -358,6 +358,29 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_DefaultAutoFetchTrueWhenOmitted(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "test.yaml")
+	content := `workspace: /test/workspace
+worktree-root: /test/worktrees
+default-base: develop
+modules:
+  - name: api
+    url: git@example.com:test/api.git
+`
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.AutoFetch {
+		t.Fatal("expected omitted auto-fetch to default to true")
+	}
+}
+
 // TestSaveConfig 测试保存配置
 func TestSaveConfig(t *testing.T) {
 	tmpDir := t.TempDir()

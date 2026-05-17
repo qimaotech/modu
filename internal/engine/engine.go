@@ -24,6 +24,11 @@ type Engine struct {
 	GitProxy gitproxy.GitClient
 }
 
+// CreateWorktreeOptions 控制创建 feature worktree 时的可选行为。
+type CreateWorktreeOptions struct {
+	SkipFetch bool
+}
+
 // MainProjectStatus 主项目（workspace 根仓库）状态
 type MainProjectStatus struct {
 	Name    string
@@ -94,6 +99,13 @@ func (e *Engine) Init(ctx context.Context) error {
 
 // CreateWorktree 并发创建 feature 工作树
 func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error {
+	return e.CreateWorktreeWithOptions(ctx, feature, base, CreateWorktreeOptions{
+		SkipFetch: !e.Config.AutoFetch,
+	})
+}
+
+// CreateWorktreeWithOptions 按指定选项并发创建 feature 工作树。
+func (e *Engine) CreateWorktreeWithOptions(ctx context.Context, feature, base string, options CreateWorktreeOptions) error {
 	logger.Info("开始创建 feature: %s, base: %s", feature, base)
 
 	// 将 feature 名转换为目录名（feature/hello → feature-hello）
@@ -131,13 +143,22 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 			}
 			// 分支存在但未被使用，复用现有分支
 			logger.Info("主项目复用现有分支 %s 创建 worktree", feature)
-			err = e.GitProxy.CreateWorktreeFromExistingBranch(ctx, e.Config.Workspace, feature, mainProjectPath)
+			if options.SkipFetch {
+				err = e.GitProxy.CreateWorktreeFromExistingBranchNoFetch(ctx, e.Config.Workspace, feature, mainProjectPath)
+			} else {
+				err = e.GitProxy.CreateWorktreeFromExistingBranch(ctx, e.Config.Workspace, feature, mainProjectPath)
+			}
 			if err != nil {
 				return fmt.Errorf("failed to create worktree for main project: %w", err)
 			}
 		} else {
 			// 分支不存在，创建新分支
-			err := e.GitProxy.CreateWorktree(ctx, e.Config.Workspace, feature, base, mainProjectPath)
+			var err error
+			if options.SkipFetch {
+				err = e.GitProxy.CreateWorktreeNoFetch(ctx, e.Config.Workspace, feature, base, mainProjectPath)
+			} else {
+				err = e.GitProxy.CreateWorktree(ctx, e.Config.Workspace, feature, base, mainProjectPath)
+			}
 			if err != nil {
 				return fmt.Errorf("failed to create worktree for main project: %w", err)
 			}
@@ -185,7 +206,11 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 
 				// 分支存在但未被使用，复用现有分支
 				logger.Info("复用现有分支 %s 创建 worktree: module=%s", feature, module.Name)
-				err = e.GitProxy.CreateWorktreeFromExistingBranch(ctx, repoPath, feature, worktreePath)
+				if options.SkipFetch {
+					err = e.GitProxy.CreateWorktreeFromExistingBranchNoFetch(ctx, repoPath, feature, worktreePath)
+				} else {
+					err = e.GitProxy.CreateWorktreeFromExistingBranch(ctx, repoPath, feature, worktreePath)
+				}
 				results <- worktreeResult{module: module, path: worktreePath, repoPath: repoPath, err: err}
 				if err != nil {
 					return fmt.Errorf("failed to create worktree for %s: %w", module.Name, err)
@@ -195,7 +220,10 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 
 			// 本地分支不存在，检查远程是否有该分支
 			// 如果远程已存在该分支，直接从远程分支创建 worktree，无需本地有该分支
-			remoteHasBranch := e.GitProxy.RemoteBranchExists(ctx, module.URL, feature)
+			remoteHasBranch := false
+			if !options.SkipFetch {
+				remoteHasBranch = e.GitProxy.RemoteBranchExists(ctx, module.URL, feature)
+			}
 			if remoteHasBranch {
 				// 远程有该分支，直接从远程分支创建 worktree（不需要后续 pull）
 				logger.Info("远程已有分支 %s，从远程创建 worktree: module=%s", feature, module.Name)
@@ -214,7 +242,12 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 				branch = module.BaseBranch
 			}
 
-			err := e.GitProxy.CreateWorktree(ctx, repoPath, feature, branch, worktreePath)
+			var err error
+			if options.SkipFetch {
+				err = e.GitProxy.CreateWorktreeNoFetch(ctx, repoPath, feature, branch, worktreePath)
+			} else {
+				err = e.GitProxy.CreateWorktree(ctx, repoPath, feature, branch, worktreePath)
+			}
 			results <- worktreeResult{module: module, path: worktreePath, repoPath: repoPath, err: err}
 			if err != nil {
 				return fmt.Errorf("failed to create worktree for %s: %w", module.Name, err)

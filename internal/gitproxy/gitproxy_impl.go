@@ -37,11 +37,16 @@ func (g *GitProxy) CreateWorktree(ctx context.Context, repoPath, branch, baseBra
 		return err
 	}
 
+	return g.CreateWorktreeNoFetch(ctx, repoPath, branch, baseBranch, worktreePath)
+}
+
+// CreateWorktreeNoFetch 不拉取远程，直接基于本地 baseBranch 创建工作树。
+func (g *GitProxy) CreateWorktreeNoFetch(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
 	// 创建 worktree
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "add", "-b", branch, worktreePath, baseBranch)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("[git worktree add] failed to create worktree at %s: %w, output: %s", worktreePath, errors.ErrGitExec, string(out))
+		return fmt.Errorf("[git worktree add] failed to create branch %s from %s at %s in %s: %w, output: %s", branch, baseBranch, worktreePath, repoPath, errors.ErrGitExec, string(out))
 	}
 	return nil
 }
@@ -53,6 +58,11 @@ func (g *GitProxy) CreateWorktreeFromExistingBranch(ctx context.Context, repoPat
 		return err
 	}
 
+	return g.CreateWorktreeFromExistingBranchNoFetch(ctx, repoPath, branch, worktreePath)
+}
+
+// CreateWorktreeFromExistingBranchNoFetch 不拉取远程，直接从现有本地分支创建 worktree。
+func (g *GitProxy) CreateWorktreeFromExistingBranchNoFetch(ctx context.Context, repoPath, branch, worktreePath string) error {
 	// 从现有分支创建 worktree（不带 -b 参数）
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "add", worktreePath, branch)
 	out, err := cmd.CombinedOutput()
@@ -173,7 +183,10 @@ func (g *GitProxy) Fetch(ctx context.Context, repoPath string) error {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "fetch", "--all")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("[git fetch] failed to fetch in %s: %w, output: %s", repoPath, errors.ErrGitExec, string(out))
+		return &FetchError{
+			RepoPath: repoPath,
+			Err:      fmt.Errorf("[git fetch] failed to fetch in %s: %w, output: %s", repoPath, errors.ErrGitExec, string(out)),
+		}
 	}
 	return nil
 }

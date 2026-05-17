@@ -137,6 +137,7 @@ func loadConfigImpl(path string) (*Config, error) {
 	}
 
 	var cfg Config
+	cfg.AutoFetch = true
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse yaml: %w", err)
 	}

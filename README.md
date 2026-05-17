@@ -60,7 +60,7 @@ app-openers:
 | `worktree-root`          | 是   | 特性分支代码存放目录      |
 | `default-base`           | 是   | 默认基准分支 (如 develop)，`modu update` 主项目时会切换到此分支 |
 | `concurrency`            | 否   | 并发数，默认 5            |
-| `auto-fetch`             | 否   | 操作前自动 fetch          |
+| `auto-fetch`             | 否   | 操作前自动 fetch；创建 feature 时省略或为 `true` 会先拉取远程，设为 `false` 时基于本地代码创建 |
 | `strict-dirty-check`     | 否   | 删除前强制脏检查          |
 | `default-selected-modules` | 否   | 创建 feature 时默认选中的模块列表（可通过 `modu default-select` 命令配置） |
 | `app-openers`           | 否   | TUI 操作菜单中的自定义打开工具 |
@@ -126,6 +126,7 @@ modu init --scan  # 自动扫描并添加模块
 modu create my-feature
 modu create my-feature --base main
 modu create my-feature --modules frontend,backend  # 只创建指定模块
+modu create my-feature --no-fetch                  # 跳过远程拉取，基于本地代码创建
 # 创建时会自动查询远端分支状态，预先选中已有该分支的模块
 
 # 列出所有 worktree
@@ -170,6 +171,8 @@ modu config scan --module "backend=..."       # 扫描并添加模块
 modu version
 ```
 
+如果 `modu create` 拉取远程失败，CLI 会保留原始错误并提示可使用 `--no-fetch` 基于本地代码创建。使用本地创建时无法确认远端是否已有同名分支，后续 push 可能需要处理冲突。
+
 ### TUI 快捷键
 
 | 按键   | 说明                            |
@@ -187,6 +190,8 @@ modu version
 | q/esc  | 退出 TUI                       |
 
 配置化 App opener 只在对应 App 已安装时显示；快捷键冲突时可通过操作菜单选中后按 Enter 执行。
+
+TUI 新建 feature 时，如果拉取远程失败，会先展示具体错误，再询问是否基于本地代码继续创建。
 
 ```bash
 # 创建配置文件

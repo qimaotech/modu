@@ -401,8 +401,8 @@ func TestSavedConfigInfo(t *testing.T) {
 	info := SavedConfigInfo{
 		ConfigPath: "/path/to/.modu.yaml",
 		Workspace:  "/workspace",
-		Worktree:  "/worktrees",
-		Base:      "develop",
+		Worktree:   "/worktrees",
+		Base:       "develop",
 	}
 
 	if info.ConfigPath != "/path/to/.modu.yaml" {

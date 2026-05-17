@@ -4,7 +4,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/qimaotech/modu/internal/config"
+	"github.com/qimaotech/modu/internal/gitproxy"
 )
 
 func TestIsInteractiveTerminal(t *testing.T) {
@@ -196,6 +200,66 @@ func TestRunCreate_FilterExistingModules(t *testing.T) {
 			t.Errorf("expected filtered[0] 'module3', got %s", filtered[0])
 		}
 	})
+}
+
+func TestCreateShouldSkipFetch(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     *config.Config
+		noFetch bool
+		want    bool
+	}{
+		{
+			name:    "no-fetch flag wins",
+			cfg:     &config.Config{AutoFetch: true},
+			noFetch: true,
+			want:    true,
+		},
+		{
+			name:    "auto fetch enabled",
+			cfg:     &config.Config{AutoFetch: true},
+			noFetch: false,
+			want:    false,
+		},
+		{
+			name:    "auto fetch disabled",
+			cfg:     &config.Config{AutoFetch: false},
+			noFetch: false,
+			want:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := createShouldSkipFetch(tt.cfg, tt.noFetch); got != tt.want {
+				t.Fatalf("createShouldSkipFetch() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatCreateError_AppendsNoFetchHintForFetchFailure(t *testing.T) {
+	err := &gitproxy.FetchError{RepoPath: "/repo", Err: errors.New("fetch failed")}
+
+	msg := formatCreateError(err)
+
+	if !strings.Contains(msg, "fetch failed") {
+		t.Fatalf("expected original error in message, got %q", msg)
+	}
+	if !strings.Contains(msg, "--no-fetch") {
+		t.Fatalf("expected --no-fetch hint in message, got %q", msg)
+	}
+	if !strings.Contains(msg, "跳过远程拉取") {
+		t.Fatalf("expected Chinese local creation hint in message, got %q", msg)
+	}
+}
+
+func TestFormatCreateError_DoesNotAppendNoFetchHintForOtherErrors(t *testing.T) {
+	msg := formatCreateError(errors.New("worktree add failed"))
+
+	if strings.Contains(msg, "--no-fetch") {
+		t.Fatalf("did not expect --no-fetch hint for non-fetch error, got %q", msg)
+	}
 }
 
 // 辅助函数和测试用结构体

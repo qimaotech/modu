@@ -10,6 +10,8 @@ type GitClient interface {
 	Clone(ctx context.Context, url, path string) error
 	// CreateWorktree 创建工作树
 	CreateWorktree(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error
+	// CreateWorktreeNoFetch 不拉取远程，直接基于本地 baseBranch 创建工作树
+	CreateWorktreeNoFetch(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error
 	// GetStatus 获取目录状态
 	GetStatus(ctx context.Context, path string) (Status, error)
 	// RemoveWorktree 删除工作树
@@ -30,6 +32,8 @@ type GitClient interface {
 	CheckBranchWorktreeStatus(ctx context.Context, repoPath, branch string) (bool, error)
 	// CreateWorktreeFromExistingBranch 从现有分支创建 worktree（不创建新分支）
 	CreateWorktreeFromExistingBranch(ctx context.Context, repoPath, branch, worktreePath string) error
+	// CreateWorktreeFromExistingBranchNoFetch 不拉取远程，直接从现有本地分支创建 worktree
+	CreateWorktreeFromExistingBranchNoFetch(ctx context.Context, repoPath, branch, worktreePath string) error
 	// RemoteBranchExists 检查远端仓库是否存在指定分支
 	RemoteBranchExists(ctx context.Context, repoURL, branch string) bool
 	// CreateWorktreeFromRemoteBranch 从远程分支创建 worktree（不创建新分支）

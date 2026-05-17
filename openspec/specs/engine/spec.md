@@ -2,9 +2,9 @@
 
 **版本**: 2.4 | **来源**: docs/plans/2026-03-06-modu-design-v2.4.md
 
-## 目的
+## Purpose
 
-定义 create/delete/list 等核心流程、并发策略、事务性创建与脏检查算法。
+定义 create/delete/list 等核心流程、并发策略、事务性创建、脏检查算法，以及 engine 与 gitproxy/config 之间的行为边界。
 
 ## 引擎职责
 
@@ -16,7 +16,7 @@
 ## CreateWorktree（事务性并发创建）
 
 1. **Pre-check**：若 `worktree-root/<feature>` 已存在，可支持“继续添加模块”或报错（由 CLI 层选择）；主项目 worktree 位于 feature 目录根，子模块位于 `feature/<module.Name>`。
-2. **Execution**：主项目先创建 worktree，再 errgroup 并发为各模块执行 `git fetch` + `git worktree add`；已存在的模块目录跳过。
+2. **Execution**：主项目先创建 worktree，再 errgroup 并发为各模块执行 `git fetch` + `git worktree add`；当创建选项或 `auto-fetch: false` 禁用 fetch 时，使用本地分支状态直接执行 `git worktree add`；已存在的模块目录跳过。
 3. **Rollback**：若任一模块失败，收集已成功创建的路径，依次 `RemoveWorktreeAndBranch(ctx, repoPath, path, dirName)` + `os.RemoveAll`，再删除主项目 worktree 与 feature 目录；其中 `dirName` 为 `featureToDirName(feature)`，返回 `ERR_PARTIAL_FAILURE` 或等价错误。
 
 ## DeleteWorktree
@@ -41,9 +41,40 @@
 | modu 命令 | 内部逻辑 |
 |-----------|----------|
 | init | `git clone <url> <workspace>/<name>`（已存在则跳过） |
-| create &lt;f&gt; | 主项目：`git -C <workspace> fetch` + `worktree add <wt-root>/<f> -b <f> <base>`；模块：`git -C <workspace>/<name> fetch` + `worktree add <wt-root>/<f>/<name> -b <f> <base>` |
+| create &lt;f&gt; | 主项目：默认 `git -C <workspace> fetch` + `worktree add <wt-root>/<f> -b <f> <base>`；模块：默认 `git -C <workspace>/<name> fetch` + `worktree add <wt-root>/<f>/<name> -b <f> <base>`；本地创建模式跳过 fetch |
 | list | 扫描 `worktree-root`，对每个 feature 读目录 + GetStatus |
 | delete &lt;f&gt; | Dirty Check（可选）→ `git worktree remove` / RemoveWorktreeAndBranch → `rm -rf <wt-root>/<f>` |
+
+## Requirements
+
+### Requirement: CreateWorktree supports explicit local-only creation
+
+The engine SHALL support feature creation with an explicit option to skip pre-create fetch and use local repository state.
+
+#### Scenario: Local-only creation skips fetch
+
+- **WHEN** `CreateWorktree` is invoked with fetch disabled
+- **THEN** the engine creates the main project and selected module worktrees without pre-create fetch attempts
+
+#### Scenario: Fetch-enabled creation fails on fetch failure
+
+- **WHEN** `CreateWorktree` is invoked with fetch enabled and a repository fetch fails before worktree creation
+- **THEN** the engine returns an error and rolls back any worktrees already created in the current operation
+
+#### Scenario: Auto-fetch disabled skips pre-create fetch
+
+- **WHEN** the loaded config has `auto-fetch: false`
+- **THEN** `CreateWorktree` creates main project and selected module worktrees without pre-create fetch attempts
+
+#### Scenario: Local-only creation preserves rollback
+
+- **WHEN** fetch is disabled but a later `git worktree add` fails
+- **THEN** the engine rolls back successfully created worktrees using the existing rollback behavior
+
+#### Scenario: Remote branch reuse remains preferred when known
+
+- **WHEN** remote branch detection succeeds and reports that a selected module has the target branch
+- **THEN** the engine continues to create that module worktree from the remote branch instead of creating a new local branch
 
 ## 与代码的对应
 

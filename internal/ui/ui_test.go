@@ -931,6 +931,89 @@ func TestApp_CreateFeatureDone_ErrorShowsError(t *testing.T) {
 	}
 }
 
+func TestApp_CreateFeatureDone_FetchErrorShowsLocalRetryPrompt(t *testing.T) {
+	app := &App{
+		Engine: engine.NewWithClient(&config.Config{
+			Workspace:    t.TempDir(),
+			WorktreeRoot: t.TempDir(),
+			AutoFetch:    true,
+		}, &uiFakeGitClient{}),
+		state: "loading",
+	}
+	fetchErr := &gitproxy.FetchError{RepoPath: "/repo", Err: os.ErrNotExist}
+
+	_, cmd := app.Update(createFeatureDoneMsg{feature: "feat-a", err: fetchErr})
+	if cmd != nil {
+		t.Error("fetch 失败确认本地创建前不应返回命令")
+	}
+	if app.state != "create_local_retry" {
+		t.Fatalf("fetch 失败后 state = %q，期望 create_local_retry", app.state)
+	}
+	view := app.View()
+	if !strings.Contains(view, "file does not exist") || !strings.Contains(view, "本地代码") {
+		t.Fatalf("确认视图应包含具体错误和本地创建提示，got %q", view)
+	}
+}
+
+func TestApp_CreateLocalRetry_AcceptRetriesNoFetch(t *testing.T) {
+	app, fake := newCreateFeatureTestApp(t)
+	app.state = "create_local_retry"
+	app.err = &gitproxy.FetchError{RepoPath: "/repo", Err: os.ErrNotExist}
+	app.moduleSelector.selected = []bool{true, false}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd == nil {
+		t.Fatal("确认本地创建应返回重试命令")
+	}
+	msg := cmd()
+	done, ok := msg.(createFeatureDoneMsg)
+	if !ok {
+		t.Fatalf("期望 createFeatureDoneMsg，got %T", msg)
+	}
+	if done.err != nil {
+		t.Fatalf("本地重试不应失败: %v", done.err)
+	}
+	if len(fake.createWorktreeNoFetchCalls) != 2 {
+		t.Fatalf("期望主项目和 m1 使用 no-fetch 创建，got %d", len(fake.createWorktreeNoFetchCalls))
+	}
+}
+
+func TestApp_CreateLocalRetry_DeclineShowsOriginalError(t *testing.T) {
+	app, _ := newCreateFeatureTestApp(t)
+	app.state = "create_local_retry"
+	app.err = &gitproxy.FetchError{RepoPath: "/repo", Err: os.ErrNotExist}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if cmd != nil {
+		t.Error("拒绝本地创建不应返回命令")
+	}
+	if app.state != "error" {
+		t.Fatalf("拒绝后 state = %q，期望 error", app.state)
+	}
+	if app.err == nil {
+		t.Fatal("拒绝后应保留原始错误")
+	}
+}
+
+func TestApp_CreateFeatureDone_FetchErrorWithAutoFetchDisabledShowsError(t *testing.T) {
+	app := &App{
+		Engine: engine.NewWithClient(&config.Config{
+			Workspace:    t.TempDir(),
+			WorktreeRoot: t.TempDir(),
+			AutoFetch:    false,
+		}, &uiFakeGitClient{}),
+		state: "loading",
+	}
+
+	_, cmd := app.Update(createFeatureDoneMsg{feature: "feat-a", err: &gitproxy.FetchError{RepoPath: "/repo", Err: os.ErrNotExist}})
+	if cmd != nil {
+		t.Error("auto-fetch=false 时不应返回命令")
+	}
+	if app.state != "error" {
+		t.Fatalf("auto-fetch=false 时 state = %q，期望 error", app.state)
+	}
+}
+
 func newCreateFeatureTestApp(t *testing.T) (*App, *uiFakeGitClient) {
 	t.Helper()
 
@@ -970,8 +1053,9 @@ type uiFakeCreateWorktreeCall struct {
 }
 
 type uiFakeGitClient struct {
-	remoteBranches      map[string]bool
-	createWorktreeCalls []uiFakeCreateWorktreeCall
+	remoteBranches             map[string]bool
+	createWorktreeCalls        []uiFakeCreateWorktreeCall
+	createWorktreeNoFetchCalls []uiFakeCreateWorktreeCall
 }
 
 func (f *uiFakeGitClient) Clone(ctx context.Context, url, path string) error {
@@ -985,6 +1069,18 @@ func (f *uiFakeGitClient) CreateWorktree(ctx context.Context, repoPath, branch, 
 		baseBranch:   baseBranch,
 		worktreePath: worktreePath,
 	})
+	return os.MkdirAll(worktreePath, 0755)
+}
+
+func (f *uiFakeGitClient) CreateWorktreeNoFetch(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+	call := uiFakeCreateWorktreeCall{
+		repoPath:     repoPath,
+		branch:       branch,
+		baseBranch:   baseBranch,
+		worktreePath: worktreePath,
+	}
+	f.createWorktreeNoFetchCalls = append(f.createWorktreeNoFetchCalls, call)
+	f.createWorktreeCalls = append(f.createWorktreeCalls, call)
 	return os.MkdirAll(worktreePath, 0755)
 }
 
@@ -1025,6 +1121,10 @@ func (f *uiFakeGitClient) CheckBranchWorktreeStatus(ctx context.Context, repoPat
 }
 
 func (f *uiFakeGitClient) CreateWorktreeFromExistingBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
+	return os.MkdirAll(worktreePath, 0755)
+}
+
+func (f *uiFakeGitClient) CreateWorktreeFromExistingBranchNoFetch(ctx context.Context, repoPath, branch, worktreePath string) error {
 	return os.MkdirAll(worktreePath, 0755)
 }
 

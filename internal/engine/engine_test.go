@@ -16,20 +16,22 @@ import (
 
 // MockGitClient 用于测试的 Mock Git 客户端
 type MockGitClient struct {
-	CloneFunc                            func(ctx context.Context, url, path string) error
-	CreateWorktreeFunc                   func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error
-	CreateWorktreeFromExistingBranchFunc func(ctx context.Context, repoPath, branch, worktreePath string) error
-	CreateWorktreeFromRemoteBranchFunc   func(ctx context.Context, repoPath, branch, worktreePath string) error
-	GetStatusFunc                        func(ctx context.Context, path string) (gitproxy.Status, error)
-	RemoveWorktreeFunc                   func(ctx context.Context, path string) error
-	RemoveWorktreeAndBranchFunc          func(ctx context.Context, repoPath, worktreePath, featureDirName string) error
-	ListWorktreesFunc                    func(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error)
-	FetchFunc                            func(ctx context.Context, repoPath string) error
-	RebaseFunc                           func(ctx context.Context, path string) error
-	FetchAndSwitchBranchFunc             func(ctx context.Context, repoPath, branch string) error
-	BranchExistsFunc                     func(ctx context.Context, repoPath, branch string) bool
-	CheckBranchWorktreeStatusFunc        func(ctx context.Context, repoPath, branch string) (bool, error)
-	RemoteBranchExistsFunc               func(ctx context.Context, repoURL, branch string) bool
+	CloneFunc                             func(ctx context.Context, url, path string) error
+	CreateWorktreeFunc                    func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error
+	CreateWorktreeNoFetchFunc             func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error
+	CreateWorktreeFromExistingBranchFunc  func(ctx context.Context, repoPath, branch, worktreePath string) error
+	CreateWorktreeFromExistingNoFetchFunc func(ctx context.Context, repoPath, branch, worktreePath string) error
+	CreateWorktreeFromRemoteBranchFunc    func(ctx context.Context, repoPath, branch, worktreePath string) error
+	GetStatusFunc                         func(ctx context.Context, path string) (gitproxy.Status, error)
+	RemoveWorktreeFunc                    func(ctx context.Context, path string) error
+	RemoveWorktreeAndBranchFunc           func(ctx context.Context, repoPath, worktreePath, featureDirName string) error
+	ListWorktreesFunc                     func(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error)
+	FetchFunc                             func(ctx context.Context, repoPath string) error
+	RebaseFunc                            func(ctx context.Context, path string) error
+	FetchAndSwitchBranchFunc              func(ctx context.Context, repoPath, branch string) error
+	BranchExistsFunc                      func(ctx context.Context, repoPath, branch string) bool
+	CheckBranchWorktreeStatusFunc         func(ctx context.Context, repoPath, branch string) (bool, error)
+	RemoteBranchExistsFunc                func(ctx context.Context, repoURL, branch string) bool
 }
 
 var _ gitproxy.GitClient = (*MockGitClient)(nil)
@@ -42,6 +44,16 @@ func (m *MockGitClient) Clone(ctx context.Context, url, path string) error {
 }
 
 func (m *MockGitClient) CreateWorktree(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+	if m.CreateWorktreeFunc != nil {
+		return m.CreateWorktreeFunc(ctx, repoPath, branch, baseBranch, worktreePath)
+	}
+	return nil
+}
+
+func (m *MockGitClient) CreateWorktreeNoFetch(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+	if m.CreateWorktreeNoFetchFunc != nil {
+		return m.CreateWorktreeNoFetchFunc(ctx, repoPath, branch, baseBranch, worktreePath)
+	}
 	if m.CreateWorktreeFunc != nil {
 		return m.CreateWorktreeFunc(ctx, repoPath, branch, baseBranch, worktreePath)
 	}
@@ -119,6 +131,16 @@ func (m *MockGitClient) RemoteBranchExists(ctx context.Context, repoURL, branch 
 }
 
 func (m *MockGitClient) CreateWorktreeFromExistingBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
+	if m.CreateWorktreeFromExistingBranchFunc != nil {
+		return m.CreateWorktreeFromExistingBranchFunc(ctx, repoPath, branch, worktreePath)
+	}
+	return nil
+}
+
+func (m *MockGitClient) CreateWorktreeFromExistingBranchNoFetch(ctx context.Context, repoPath, branch, worktreePath string) error {
+	if m.CreateWorktreeFromExistingNoFetchFunc != nil {
+		return m.CreateWorktreeFromExistingNoFetchFunc(ctx, repoPath, branch, worktreePath)
+	}
 	if m.CreateWorktreeFromExistingBranchFunc != nil {
 		return m.CreateWorktreeFromExistingBranchFunc(ctx, repoPath, branch, worktreePath)
 	}
@@ -371,6 +393,166 @@ func TestCreateWorktree_CreateNewBranchWhenNotExists(t *testing.T) {
 
 	if !createNewBranchCalled {
 		t.Error("expected CreateWorktree to be called when branch does not exist")
+	}
+}
+
+func TestCreateWorktreeWithOptions_LocalOnlySkipsFetchCreation(t *testing.T) {
+	cfg := &config.Config{
+		Workspace:    "/tmp/test-workspace",
+		WorktreeRoot: "/tmp/test-worktrees",
+		DefaultBase:  "develop",
+		Concurrency:  1,
+		AutoFetch:    true,
+		Modules: []config.Module{
+			{Name: "module1", URL: "git@github.com:test/module1.git"},
+		},
+	}
+
+	var fetchCreateCalls int
+	var noFetchCreateCalls int
+	var remoteBranchChecks int
+
+	mock := &MockGitClient{
+		BranchExistsFunc: func(ctx context.Context, repoPath, branch string) bool {
+			return false
+		},
+		RemoteBranchExistsFunc: func(ctx context.Context, repoURL, branch string) bool {
+			remoteBranchChecks++
+			return false
+		},
+		CreateWorktreeFunc: func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+			fetchCreateCalls++
+			return nil
+		},
+		CreateWorktreeNoFetchFunc: func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+			noFetchCreateCalls++
+			return nil
+		},
+	}
+
+	engine := NewWithClient(cfg, mock)
+	err := engine.CreateWorktreeWithOptions(context.Background(), "test-feature", "develop", CreateWorktreeOptions{SkipFetch: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if fetchCreateCalls != 0 {
+		t.Fatalf("expected no fetch-enabled create calls, got %d", fetchCreateCalls)
+	}
+	if noFetchCreateCalls != 2 {
+		t.Fatalf("expected main and module no-fetch create calls, got %d", noFetchCreateCalls)
+	}
+	if remoteBranchChecks != 0 {
+		t.Fatalf("expected local-only creation to skip remote branch checks, got %d", remoteBranchChecks)
+	}
+}
+
+func TestCreateWorktree_AutoFetchDisabledUsesLocalOnlyCreation(t *testing.T) {
+	cfg := &config.Config{
+		Workspace:    "/tmp/test-workspace",
+		WorktreeRoot: "/tmp/test-worktrees",
+		DefaultBase:  "develop",
+		Concurrency:  1,
+		AutoFetch:    false,
+		Modules: []config.Module{
+			{Name: "module1", URL: "git@github.com:test/module1.git", BaseBranch: "release/v1"},
+		},
+	}
+
+	var noFetchBaseBranches []string
+	mock := &MockGitClient{
+		BranchExistsFunc: func(ctx context.Context, repoPath, branch string) bool {
+			return false
+		},
+		CreateWorktreeNoFetchFunc: func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+			noFetchBaseBranches = append(noFetchBaseBranches, baseBranch)
+			return nil
+		},
+	}
+
+	engine := NewWithClient(cfg, mock)
+	err := engine.CreateWorktree(context.Background(), "test-feature", "develop")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(noFetchBaseBranches) != 2 {
+		t.Fatalf("expected main and module no-fetch creates, got %d", len(noFetchBaseBranches))
+	}
+	if noFetchBaseBranches[0] != "develop" {
+		t.Fatalf("expected main base develop, got %s", noFetchBaseBranches[0])
+	}
+	if noFetchBaseBranches[1] != "release/v1" {
+		t.Fatalf("expected module base release/v1, got %s", noFetchBaseBranches[1])
+	}
+}
+
+func TestCreateWorktree_FetchFailureIsDistinguishable(t *testing.T) {
+	cfg := &config.Config{
+		Workspace:    "/tmp/test-workspace",
+		WorktreeRoot: "/tmp/test-worktrees",
+		DefaultBase:  "develop",
+		Concurrency:  1,
+		AutoFetch:    true,
+	}
+
+	mock := &MockGitClient{
+		BranchExistsFunc: func(ctx context.Context, repoPath, branch string) bool {
+			return false
+		},
+		CreateWorktreeFunc: func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+			return &gitproxy.FetchError{RepoPath: repoPath, Err: errors.New("fetch failed")}
+		},
+	}
+
+	engine := NewWithClient(cfg, mock)
+	err := engine.CreateWorktree(context.Background(), "test-feature", "develop")
+	if err == nil {
+		t.Fatal("expected fetch failure")
+	}
+	if !gitproxy.IsFetchError(err) {
+		t.Fatalf("expected fetch failure to remain distinguishable, got %v", err)
+	}
+}
+
+func TestCreateWorktree_LocalOnlyRollbackAfterModuleFailure(t *testing.T) {
+	cfg := &config.Config{
+		Workspace:    "/tmp/test-workspace",
+		WorktreeRoot: "/tmp/test-worktrees",
+		DefaultBase:  "develop",
+		Concurrency:  1,
+		AutoFetch:    false,
+		Modules: []config.Module{
+			{Name: "module1", URL: "git@github.com:test/module1.git"},
+			{Name: "module2", URL: "git@github.com:test/module2.git"},
+		},
+	}
+
+	var removedPaths []string
+	mock := &MockGitClient{
+		BranchExistsFunc: func(ctx context.Context, repoPath, branch string) bool {
+			return false
+		},
+		CreateWorktreeNoFetchFunc: func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+			if filepath.Base(worktreePath) == "module2" {
+				return errors.New("module2 failed")
+			}
+			return nil
+		},
+		RemoveWorktreeAndBranchFunc: func(ctx context.Context, repoPath, worktreePath, featureDirName string) error {
+			removedPaths = append(removedPaths, worktreePath)
+			return nil
+		},
+	}
+
+	engine := NewWithClient(cfg, mock)
+	err := engine.CreateWorktree(context.Background(), "test-feature", "develop")
+	if err == nil {
+		t.Fatal("expected module failure")
+	}
+
+	if len(removedPaths) < 2 {
+		t.Fatalf("expected rollback to remove successful module and main worktree, got %v", removedPaths)
 	}
 }
 
