@@ -98,6 +98,7 @@ func main() {
 		Run:   runDelete,
 	}
 	deleteCmd.Flags().BoolP("force", "f", false, "强制删除（跳过脏检查）")
+	deleteCmd.Flags().Bool("allow-unpushed", false, "允许删除未推送到远端的本地分支")
 
 	// default-select 命令 - 设置默认选中的模块
 	defaultSelectCmd := &cobra.Command{
@@ -407,11 +408,30 @@ func runCreate(cmd *cobra.Command, args []string) {
 func runDelete(cmd *cobra.Command, args []string) {
 	feature := args[0]
 	force, _ := cmd.Flags().GetBool("force")
+	allowUnpushedBranches, _ := cmd.Flags().GetBool("allow-unpushed")
 
 	eng := loadConfig()
 	formatter := output.New(outputFmt)
 
-	err := eng.DeleteWorktree(cmd.Context(), feature, force)
+	unpushedBranches, err := eng.CheckDeleteUnpushedBranches(cmd.Context(), feature)
+	if err != nil {
+		fmt.Print(formatter.FormatError(errors.Code(err), err.Error(), nil))
+		os.Exit(1)
+	}
+
+	if len(unpushedBranches) > 0 && !allowUnpushedBranches {
+		data := map[string]interface{}{
+			"feature":  feature,
+			"branches": unpushedBranches,
+		}
+		message := fmt.Sprintf("cannot delete feature %s: unpushed branches detected, rerun with --allow-unpushed to confirm deletion", feature)
+		fmt.Print(formatter.FormatError(errors.Code(errors.ErrUnpushedBranch), message, data))
+		os.Exit(1)
+	}
+
+	err = eng.DeleteWorktreeWithOptions(cmd.Context(), feature, force, engine.DeleteOptions{
+		AllowUnpushedBranches: allowUnpushedBranches,
+	})
 	if err != nil {
 		fmt.Print(formatter.FormatError(errors.Code(err), err.Error(), nil))
 		os.Exit(1)

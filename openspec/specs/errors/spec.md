@@ -18,6 +18,7 @@
 | `ERR_FEATURE_NOT_FOUND` | Feature 目录不存在 |
 | `ERR_MODULE_NOT_FOUND` | 模块路径不存在（如 git status 时目录缺失） |
 | `ERR_INVALID_OPERATION` | 非法操作（预留） |
+| `ERR_UNPUSHED_BRANCH` | 删除被未推送本地分支保护拦截 |
 
 ## 错误包装
 
@@ -76,6 +77,20 @@
 | Git 失败 | 带出完整错误信息 | 界面提示并允许重试 |
 | 并发部分失败 | 打印成功/失败汇总 | 显示失败模块列表 |
 | 脏检查失败 | 退出码非 0 | 弹窗阻止删除 |
+| 未推送本地分支 | 返回 `ERR_UNPUSHED_BRANCH`；用户通过 `--allow-unpushed` 显式确认后才删除 | 二次确认后才删除 |
+
+## Requirements
+
+### Requirement: Unpushed branch deletion error
+The system SHALL expose a machine-readable error code for deletion blocked by unpushed local branches.
+
+#### Scenario: Error code for blocked deletion
+- **WHEN** deletion is blocked because one or more local branches are not fully pushed
+- **THEN** the returned error code is `ERR_UNPUSHED_BRANCH`
+
+#### Scenario: JSON output includes branch details
+- **WHEN** JSON output is requested for a delete operation blocked by unpushed branches
+- **THEN** the error response includes enough detail to identify the affected repositories, worktrees, branches, and reasons
 
 ## 与代码的对应
 

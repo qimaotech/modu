@@ -25,6 +25,29 @@
 2. 若未使用 `--force` 且 `Config.StrictDirty` 为 true：构建 `WorktreeEnv` 时仅包含 **配置内模块** 子目录，调用 **CheckDirty**；若有 dirty 模块，返回 `ERR_DIRTY_WORKTREE`。
 3. 仅对 **配置内模块** 依次执行 `RemoveWorktreeAndBranch(ctx, repoPath, modulePath, dirName)`，再对主项目执行 `RemoveWorktreeAndBranch(ctx, workspace, mainProjectPath, dirName)`，最后 `os.RemoveAll(featurePath)`。`dirName` 为 `featureToDirName(feature)`，供 gitproxy 校验「当前分支 slug」与目录名一致后再删分支。不对非配置目录单独调用 RemoveWorktreeAndBranch。
 
+### Requirement: Engine preflights unpushed branch deletion
+The engine SHALL identify all local branches that would be deleted by a feature deletion before removing any worktree.
+
+#### Scenario: Candidate branch is fully pushed
+- **WHEN** a candidate branch has no local commits ahead of its remote branch
+- **THEN** the engine treats that branch as safe for deletion
+
+#### Scenario: Candidate branch is not fully pushed
+- **WHEN** a candidate branch has no remote branch, no usable upstream, a failed push-state lookup, or local commits ahead of its remote branch
+- **THEN** the engine reports that branch as requiring confirmation before deletion
+
+#### Scenario: Delete without confirmation has unpushed branches
+- **WHEN** `DeleteWorktree` is called for a feature with unpushed branch candidates
+- **THEN** the engine returns `ERR_UNPUSHED_BRANCH` without removing worktrees or local branches
+
+#### Scenario: Delete with explicit confirmation has unpushed branches
+- **WHEN** an options-based delete call explicitly allows unpushed branch deletion
+- **THEN** the engine may remove the worktrees and matching local branches after normal dirty-check rules pass
+
+#### Scenario: Branch is not a deletion candidate
+- **WHEN** a worktree is detached, has no readable branch, or its branch slug does not match the feature directory name
+- **THEN** the engine does not require unpushed-branch confirmation for that worktree because the branch will not be deleted
+
 ## CheckDirty
 
 - 输入：`WorktreeEnv`（含各模块 Path）。

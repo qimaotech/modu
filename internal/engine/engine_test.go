@@ -11,6 +11,7 @@ import (
 
 	"github.com/qimaotech/modu/internal/config"
 	"github.com/qimaotech/modu/internal/core"
+	errs "github.com/qimaotech/modu/internal/errors"
 	"github.com/qimaotech/modu/internal/gitproxy"
 )
 
@@ -30,6 +31,7 @@ type MockGitClient struct {
 	BranchExistsFunc                     func(ctx context.Context, repoPath, branch string) bool
 	CheckBranchWorktreeStatusFunc        func(ctx context.Context, repoPath, branch string) (bool, error)
 	RemoteBranchExistsFunc               func(ctx context.Context, repoURL, branch string) bool
+	GetBranchPushStatusFunc              func(ctx context.Context, repoPath, branch string) (gitproxy.BranchPushStatus, error)
 }
 
 var _ gitproxy.GitClient = (*MockGitClient)(nil)
@@ -116,6 +118,13 @@ func (m *MockGitClient) RemoteBranchExists(ctx context.Context, repoURL, branch 
 		return m.RemoteBranchExistsFunc(ctx, repoURL, branch)
 	}
 	return false
+}
+
+func (m *MockGitClient) GetBranchPushStatus(ctx context.Context, repoPath, branch string) (gitproxy.BranchPushStatus, error) {
+	if m.GetBranchPushStatusFunc != nil {
+		return m.GetBranchPushStatusFunc(ctx, repoPath, branch)
+	}
+	return gitproxy.BranchPushStatus{Branch: branch, RemoteRef: "origin/" + branch, IsPushed: true}, nil
 }
 
 func (m *MockGitClient) CreateWorktreeFromExistingBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
@@ -988,4 +997,137 @@ func TestAddModule_UsesWorkspaceMetadataForSlugFeature(t *testing.T) {
 	if createdBranch != "feature/demand-pay-cpr" {
 		t.Errorf("expected branch feature/demand-pay-cpr, got %s", createdBranch)
 	}
+}
+
+func TestDeleteWorktree_BlocksUnpushedBranches(t *testing.T) {
+	engine, mock, removedCount := newDeletePreflightTestEngine(t, gitproxy.BranchPushStatus{
+		Branch:     "feat-a",
+		RemoteRef:  "origin/feat-a",
+		IsPushed:   false,
+		AheadCount: 1,
+		Reason:     "1 local commits not pushed",
+	})
+
+	err := engine.DeleteWorktree(context.Background(), "feat-a", false)
+	if !errors.Is(err, errs.ErrUnpushedBranch) {
+		t.Fatalf("expected ErrUnpushedBranch, got %v", err)
+	}
+	if *removedCount != 0 {
+		t.Fatalf("expected no removal before confirmation, got %d", *removedCount)
+	}
+	if mock.GetBranchPushStatusFunc == nil {
+		t.Fatal("expected push status mock to be configured")
+	}
+}
+
+func TestDeleteWorktree_AllowsPushedBranches(t *testing.T) {
+	engine, _, removedCount := newDeletePreflightTestEngine(t, gitproxy.BranchPushStatus{
+		Branch:    "feat-a",
+		RemoteRef: "origin/feat-a",
+		IsPushed:  true,
+	})
+
+	err := engine.DeleteWorktree(context.Background(), "feat-a", false)
+	if err != nil {
+		t.Fatalf("DeleteWorktree() unexpected error: %v", err)
+	}
+	if *removedCount != 2 {
+		t.Fatalf("expected module and main removal, got %d", *removedCount)
+	}
+}
+
+func TestDeleteWorktreeWithOptions_AllowsConfirmedUnpushedBranches(t *testing.T) {
+	engine, _, removedCount := newDeletePreflightTestEngine(t, gitproxy.BranchPushStatus{
+		Branch:     "feat-a",
+		RemoteRef:  "origin/feat-a",
+		IsPushed:   false,
+		AheadCount: 1,
+		Reason:     "1 local commits not pushed",
+	})
+
+	err := engine.DeleteWorktreeWithOptions(context.Background(), "feat-a", false, DeleteOptions{
+		AllowUnpushedBranches: true,
+	})
+	if err != nil {
+		t.Fatalf("DeleteWorktreeWithOptions() unexpected error: %v", err)
+	}
+	if *removedCount != 2 {
+		t.Fatalf("expected module and main removal, got %d", *removedCount)
+	}
+}
+
+func TestCheckDeleteUnpushedBranches_SkipsNonCandidateBranches(t *testing.T) {
+	cfg, _ := newDeletePreflightConfig(t)
+	pushStatusCalled := false
+	mock := &MockGitClient{
+		GetStatusFunc: func(ctx context.Context, path string) (gitproxy.Status, error) {
+			return gitproxy.Status{Branch: "other-branch"}, nil
+		},
+		GetBranchPushStatusFunc: func(ctx context.Context, repoPath, branch string) (gitproxy.BranchPushStatus, error) {
+			pushStatusCalled = true
+			return gitproxy.BranchPushStatus{}, nil
+		},
+	}
+	engine := NewWithClient(cfg, mock)
+
+	risks, err := engine.CheckDeleteUnpushedBranches(context.Background(), "feat-a")
+	if err != nil {
+		t.Fatalf("CheckDeleteUnpushedBranches() unexpected error: %v", err)
+	}
+	if len(risks) != 0 {
+		t.Fatalf("expected no risks for non-candidate branch, got %+v", risks)
+	}
+	if pushStatusCalled {
+		t.Fatal("push status should not be checked for non-candidate branch")
+	}
+}
+
+func newDeletePreflightTestEngine(t *testing.T, pushStatus gitproxy.BranchPushStatus) (*Engine, *MockGitClient, *int) {
+	t.Helper()
+
+	cfg, _ := newDeletePreflightConfig(t)
+	removedCount := 0
+	mock := &MockGitClient{
+		GetStatusFunc: func(ctx context.Context, path string) (gitproxy.Status, error) {
+			return gitproxy.Status{Branch: "feat-a"}, nil
+		},
+		GetBranchPushStatusFunc: func(ctx context.Context, repoPath, branch string) (gitproxy.BranchPushStatus, error) {
+			return pushStatus, nil
+		},
+		RemoveWorktreeAndBranchFunc: func(ctx context.Context, repoPath, worktreePath, featureDirName string) error {
+			removedCount++
+			return nil
+		},
+	}
+	return NewWithClient(cfg, mock), mock, &removedCount
+}
+
+func newDeletePreflightConfig(t *testing.T) (*config.Config, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "workspace")
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	featurePath := filepath.Join(worktreeRoot, "feat-a")
+
+	for _, path := range []string{
+		workspace,
+		filepath.Join(workspace, "module1"),
+		featurePath,
+		filepath.Join(featurePath, "module1"),
+	} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := &config.Config{
+		Workspace:    workspace,
+		WorktreeRoot: worktreeRoot,
+		StrictDirty:  false,
+		Modules: []config.Module{
+			{Name: "module1", URL: "git@example.com:module1.git"},
+		},
+	}
+	return cfg, featurePath
 }

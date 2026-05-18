@@ -368,6 +368,66 @@ func TestApp_View_Confirm(t *testing.T) {
 	}
 }
 
+// TestApp_View_UnpushedConfirm 未推送分支确认视图包含风险分支
+func TestApp_View_UnpushedConfirm(t *testing.T) {
+	app := &App{
+		state:   "confirm_unpushed",
+		feature: "feat-a",
+		unpushedBranches: []engine.UnpushedBranch{
+			{Name: "module1", Branch: "feat-a", Reason: "1 local commits not pushed"},
+		},
+	}
+	view := app.renderUnpushedConfirm()
+	if !strings.Contains(view, "确认删除未推送分支") || !strings.Contains(view, "module1") {
+		t.Fatalf("renderUnpushedConfirm() missing risk details: %q", view)
+	}
+}
+
+// TestApp_UnpushedConfirm_Cancel 取消未推送确认不执行删除
+func TestApp_UnpushedConfirm_Cancel(t *testing.T) {
+	app, fake := newDeleteRiskTestApp(t)
+	app.state = "confirm_unpushed"
+	app.unpushedBranches = []engine.UnpushedBranch{{Name: "module1", Branch: "feat-a"}}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if cmd != nil {
+		t.Fatal("取消未推送确认不应返回命令")
+	}
+	if app.state != "list" {
+		t.Fatalf("state = %q, want list", app.state)
+	}
+	if fake.removeCalls != 0 {
+		t.Fatalf("取消后不应删除，removeCalls=%d", fake.removeCalls)
+	}
+}
+
+// TestApp_DeleteFlow_UnpushedConfirmThenDelete 未推送分支需要二次确认后删除
+func TestApp_DeleteFlow_UnpushedConfirmThenDelete(t *testing.T) {
+	app, fake := newDeleteRiskTestApp(t)
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd != nil {
+		t.Fatal("进入未推送确认不应立即返回删除命令")
+	}
+	if app.state != "confirm_unpushed" {
+		t.Fatalf("state = %q, want confirm_unpushed", app.state)
+	}
+	if fake.removeCalls != 0 {
+		t.Fatalf("二次确认前不应删除，removeCalls=%d", fake.removeCalls)
+	}
+
+	_, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd == nil {
+		t.Fatal("确认删除后应返回刷新列表命令")
+	}
+	if app.state != "loading" {
+		t.Fatalf("state = %q, want loading", app.state)
+	}
+	if fake.removeCalls != 2 {
+		t.Fatalf("期望删除模块和主项目，removeCalls=%d", fake.removeCalls)
+	}
+}
+
 // TestApp_View_Error 错误状态视图包含错误信息
 func TestApp_View_Error(t *testing.T) {
 	app := &App{state: "error", err: nil}
@@ -962,6 +1022,54 @@ func newCreateFeatureTestApp(t *testing.T) (*App, *uiFakeGitClient) {
 	return app, fake
 }
 
+func newDeleteRiskTestApp(t *testing.T) (*App, *uiFakeGitClient) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "workspace")
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	featurePath := filepath.Join(worktreeRoot, "feat-a")
+	moduleRepoPath := filepath.Join(workspace, "module1")
+	moduleWorktreePath := filepath.Join(featurePath, "module1")
+	for _, path := range []string{workspace, moduleRepoPath, featurePath, moduleWorktreePath} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fake := &uiFakeGitClient{
+		pushStatuses: map[string]gitproxy.BranchPushStatus{
+			workspace + "|feat-a": {
+				Branch:     "feat-a",
+				RemoteRef:  "origin/feat-a",
+				IsPushed:   false,
+				AheadCount: 1,
+				Reason:     "1 local commits not pushed",
+			},
+			moduleRepoPath + "|feat-a": {
+				Branch:     "feat-a",
+				RemoteRef:  "origin/feat-a",
+				IsPushed:   false,
+				AheadCount: 1,
+				Reason:     "1 local commits not pushed",
+			},
+		},
+	}
+	cfg := &config.Config{
+		Workspace:    workspace,
+		WorktreeRoot: worktreeRoot,
+		Modules: []config.Module{
+			{Name: "module1", URL: "git@example.com:module1.git"},
+		},
+	}
+	app := &App{
+		Engine:  engine.NewWithClient(cfg, fake),
+		state:   "confirm",
+		feature: "feat-a",
+	}
+	return app, fake
+}
+
 type uiFakeCreateWorktreeCall struct {
 	repoPath     string
 	branch       string
@@ -971,7 +1079,9 @@ type uiFakeCreateWorktreeCall struct {
 
 type uiFakeGitClient struct {
 	remoteBranches      map[string]bool
+	pushStatuses        map[string]gitproxy.BranchPushStatus
 	createWorktreeCalls []uiFakeCreateWorktreeCall
+	removeCalls         int
 }
 
 func (f *uiFakeGitClient) Clone(ctx context.Context, url, path string) error {
@@ -997,6 +1107,7 @@ func (f *uiFakeGitClient) RemoveWorktree(ctx context.Context, path string) error
 }
 
 func (f *uiFakeGitClient) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktreePath, featureDirName string) error {
+	f.removeCalls++
 	return nil
 }
 
@@ -1037,4 +1148,13 @@ func (f *uiFakeGitClient) RemoteBranchExists(ctx context.Context, repoURL, branc
 
 func (f *uiFakeGitClient) CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
 	return os.MkdirAll(worktreePath, 0755)
+}
+
+func (f *uiFakeGitClient) GetBranchPushStatus(ctx context.Context, repoPath, branch string) (gitproxy.BranchPushStatus, error) {
+	if f.pushStatuses != nil {
+		if status, ok := f.pushStatuses[repoPath+"|"+branch]; ok {
+			return status, nil
+		}
+	}
+	return gitproxy.BranchPushStatus{Branch: branch, RemoteRef: "origin/" + branch, IsPushed: true}, nil
 }

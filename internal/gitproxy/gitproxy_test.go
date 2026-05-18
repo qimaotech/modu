@@ -10,12 +10,12 @@ import (
 
 func TestParseStatus(t *testing.T) {
 	tests := []struct {
-		name           string
-		output         string
-		path           string
-		wantIsDirty    bool
-		wantBranch     string
-		wantFileCount  int
+		name          string
+		output        string
+		path          string
+		wantIsDirty   bool
+		wantBranch    string
+		wantFileCount int
 	}{
 		{
 			name:          "clean working tree",
@@ -116,7 +116,7 @@ func TestParseWorktreeList(t *testing.T) {
 			wantFirstBranch: "main",
 		},
 		{
-			name:            "multiple worktrees",
+			name: "multiple worktrees",
 			output: `worktree /home/user/repos/main
 HEAD abcd1234
 branch refs/heads/main
@@ -258,5 +258,97 @@ func TestRemoteBranchExists_NetworkError(t *testing.T) {
 	exists := g.RemoteBranchExists(context.Background(), "git@192.0.2.1:nonexistent/repo.git", "main")
 	if exists {
 		t.Error("expected false for network error")
+	}
+}
+
+func TestGetBranchPushStatus_Pushed(t *testing.T) {
+	repoPath := setupPushStatusRepo(t, "feature/test")
+
+	g := &GitProxy{}
+	status, err := g.GetBranchPushStatus(context.Background(), repoPath, "feature/test")
+	if err != nil {
+		t.Fatalf("GetBranchPushStatus() unexpected error: %v", err)
+	}
+	if !status.IsPushed {
+		t.Fatalf("IsPushed = false, want true: %+v", status)
+	}
+	if status.AheadCount != 0 {
+		t.Fatalf("AheadCount = %d, want 0", status.AheadCount)
+	}
+}
+
+func TestGetBranchPushStatus_AheadOfRemote(t *testing.T) {
+	repoPath := setupPushStatusRepo(t, "feature/test")
+	writeCommit(t, repoPath, "local.txt", "local change", "local change")
+
+	g := &GitProxy{}
+	status, err := g.GetBranchPushStatus(context.Background(), repoPath, "feature/test")
+	if err != nil {
+		t.Fatalf("GetBranchPushStatus() unexpected error: %v", err)
+	}
+	if status.IsPushed {
+		t.Fatalf("IsPushed = true, want false: %+v", status)
+	}
+	if status.AheadCount != 1 {
+		t.Fatalf("AheadCount = %d, want 1", status.AheadCount)
+	}
+}
+
+func TestGetBranchPushStatus_MissingRemoteBranch(t *testing.T) {
+	repoPath := setupPushStatusRepo(t, "feature/test")
+	runGit(t, repoPath, "checkout", "-b", "local-only")
+	writeCommit(t, repoPath, "local-only.txt", "local only", "local only")
+
+	g := &GitProxy{}
+	status, err := g.GetBranchPushStatus(context.Background(), repoPath, "local-only")
+	if err != nil {
+		t.Fatalf("GetBranchPushStatus() unexpected error: %v", err)
+	}
+	if status.IsPushed {
+		t.Fatalf("IsPushed = true, want false: %+v", status)
+	}
+	if status.Reason == "" {
+		t.Fatalf("Reason should explain missing remote branch: %+v", status)
+	}
+}
+
+func setupPushStatusRepo(t *testing.T, branch string) string {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	remotePath := filepath.Join(tmpDir, "remote.git")
+	repoPath := filepath.Join(tmpDir, "repo")
+
+	runGit(t, "", "init", "--bare", remotePath)
+	runGit(t, "", "clone", remotePath, repoPath)
+	runGit(t, repoPath, "config", "user.name", "modu test")
+	runGit(t, repoPath, "config", "user.email", "modu@example.com")
+	runGit(t, repoPath, "checkout", "-b", branch)
+	writeCommit(t, repoPath, "README.md", "initial", "initial")
+	runGit(t, repoPath, "push", "-u", "origin", branch)
+
+	return repoPath
+}
+
+func writeCommit(t *testing.T, repoPath, fileName, content, message string) {
+	t.Helper()
+
+	if err := os.WriteFile(filepath.Join(repoPath, fileName), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoPath, "add", fileName)
+	runGit(t, repoPath, "commit", "-m", message)
+}
+
+func runGit(t *testing.T, repoPath string, args ...string) {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	if repoPath != "" {
+		cmd.Dir = repoPath
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v, output: %s", args, err, string(out))
 	}
 }

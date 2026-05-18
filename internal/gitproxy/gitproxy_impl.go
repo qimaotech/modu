@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/qimaotech/modu/internal/errors"
@@ -267,6 +268,84 @@ func (g *GitProxy) CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath,
 		return fmt.Errorf("[git worktree add] failed to create worktree from remote branch %s at %s: %w, output: %s", branch, worktreePath, errors.ErrGitExec, string(out))
 	}
 	return nil
+}
+
+// GetBranchPushStatus 检查本地分支是否已完整推送到远端分支。
+func (g *GitProxy) GetBranchPushStatus(ctx context.Context, repoPath, branch string) (BranchPushStatus, error) {
+	branch = strings.TrimSpace(branch)
+	status := BranchPushStatus{Branch: branch}
+	if branch == "" || branch == "HEAD" {
+		status.Reason = "invalid branch"
+		return status, nil
+	}
+
+	if err := g.Fetch(ctx, repoPath); err != nil {
+		status.Reason = "fetch failed"
+		return status, fmt.Errorf("[git fetch] failed to inspect push status for branch %s in %s: %w", branch, repoPath, err)
+	}
+
+	remoteRef, found, err := g.resolveBranchRemoteRef(ctx, repoPath, branch)
+	if err != nil {
+		status.Reason = "remote lookup failed"
+		return status, err
+	}
+	if !found {
+		status.Reason = "remote branch not found"
+		return status, nil
+	}
+	status.RemoteRef = remoteRef
+
+	aheadCount, err := g.countBranchAhead(ctx, repoPath, remoteRef, branch)
+	if err != nil {
+		status.Reason = "ahead count failed"
+		return status, err
+	}
+	status.AheadCount = aheadCount
+	status.IsPushed = aheadCount == 0
+	if aheadCount > 0 {
+		status.Reason = fmt.Sprintf("%d local commits not pushed", aheadCount)
+	}
+	return status, nil
+}
+
+// resolveBranchRemoteRef 优先使用 upstream，否则回退到 origin/<branch>。
+func (g *GitProxy) resolveBranchRemoteRef(ctx context.Context, repoPath, branch string) (string, bool, error) {
+	upstreamArg := branch + "@{upstream}"
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "--abbrev-ref", upstreamArg)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		remoteRef := strings.TrimSpace(string(out))
+		if remoteRef != "" {
+			return remoteRef, true, nil
+		}
+	}
+
+	fallbackRemoteRef := "origin/" + branch
+	verifyRef := "refs/remotes/" + fallbackRemoteRef
+	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "--verify", "--quiet", verifyRef)
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		return "", false, nil
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return "", false, nil
+	}
+	return fallbackRemoteRef, true, nil
+}
+
+// countBranchAhead 返回 local branch 相对 remoteRef 的领先提交数。
+func (g *GitProxy) countBranchAhead(ctx context.Context, repoPath, remoteRef, branch string) (int, error) {
+	revisionRange := remoteRef + ".." + branch
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-list", "--count", revisionRange)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("[git rev-list] failed to count ahead commits for %s in %s: %w, output: %s", branch, repoPath, errors.ErrGitExec, string(out))
+	}
+	aheadCount, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("[git rev-list] invalid ahead count for %s in %s: %w, output: %s", branch, repoPath, err, string(out))
+	}
+	return aheadCount, nil
 }
 
 // CheckBranchWorktreeStatus 检查分支是否已被 worktree 使用

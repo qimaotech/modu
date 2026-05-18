@@ -34,6 +34,8 @@ type GitClient interface {
 	RemoteBranchExists(ctx context.Context, repoURL, branch string) bool
 	// CreateWorktreeFromRemoteBranch 从远程分支创建 worktree（不创建新分支）
 	CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath, branch, worktreePath string) error
+	// GetBranchPushStatus 检查本地分支是否已完整推送到远端分支
+	GetBranchPushStatus(ctx context.Context, repoPath, branch string) (BranchPushStatus, error)
 }
 
 // Status Git 状态
@@ -53,4 +55,13 @@ type FileStatus struct {
 type WorktreeInfo struct {
 	Path   string
 	Branch string
+}
+
+// BranchPushStatus 记录本地分支相对远端分支的推送状态。
+type BranchPushStatus struct {
+	Branch     string `json:"branch"`
+	RemoteRef  string `json:"remoteRef"`
+	IsPushed   bool   `json:"isPushed"`
+	AheadCount int    `json:"aheadCount"`
+	Reason     string `json:"reason,omitempty"`
 }

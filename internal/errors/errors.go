@@ -12,6 +12,7 @@ var (
 	ErrFeatureNotFound  = errors.New("ERR_FEATURE_NOT_FOUND")
 	ErrModuleNotFound   = errors.New("ERR_MODULE_NOT_FOUND")
 	ErrInvalidOperation = errors.New("ERR_INVALID_OPERATION")
+	ErrUnpushedBranch   = errors.New("ERR_UNPUSHED_BRANCH")
 )
 
 // Code 返回错误码字符串
@@ -42,6 +43,9 @@ func Code(err error) string {
 	}
 	if errors.Is(err, ErrInvalidOperation) {
 		return "ERR_INVALID_OPERATION"
+	}
+	if errors.Is(err, ErrUnpushedBranch) {
+		return "ERR_UNPUSHED_BRANCH"
 	}
 	return "ERR_UNKNOWN"
 }
