@@ -57,6 +57,11 @@ func TestCode(t *testing.T) {
 			wantCode: "ERR_INVALID_OPERATION",
 		},
 		{
+			name:     "ErrUnpushedBranch",
+			err:      ErrUnpushedBranch,
+			wantCode: "ERR_UNPUSHED_BRANCH",
+		},
+		{
 			name:     "wrapped error",
 			err:      errors.New("wrapped: " + ErrConfigInvalid.Error()),
 			wantCode: "ERR_UNKNOWN",

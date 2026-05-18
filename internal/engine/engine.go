@@ -32,6 +32,22 @@ type MainProjectStatus struct {
 	Branch  string
 }
 
+// UnpushedBranch 描述删除时会移除、但未确认已推送的本地分支。
+type UnpushedBranch struct {
+	Name         string `json:"name"`
+	RepoPath     string `json:"repoPath"`
+	WorktreePath string `json:"worktreePath"`
+	Branch       string `json:"branch"`
+	RemoteRef    string `json:"remoteRef,omitempty"`
+	AheadCount   int    `json:"aheadCount,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+}
+
+// DeleteOptions 控制 feature 删除中的危险操作是否已被外层确认。
+type DeleteOptions struct {
+	AllowUnpushedBranches bool
+}
+
 // worktreeResult 创建工作树的结果
 type worktreeResult struct {
 	module   config.Module
@@ -433,8 +449,89 @@ func (e *Engine) CheckDirty(ctx context.Context, env core.WorktreeEnv) ([]core.M
 	return dirty, nil
 }
 
+// CheckDeleteUnpushedBranches 返回删除 feature 时需要人工确认的本地分支。
+func (e *Engine) CheckDeleteUnpushedBranches(ctx context.Context, feature string) ([]UnpushedBranch, error) {
+	dirName := featureToDirName(feature)
+	featurePath := filepath.Join(e.Config.WorktreeRoot, dirName)
+	if _, err := os.Stat(featurePath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("feature %s not found: %w", feature, errs.ErrFeatureNotFound)
+	}
+
+	entries, err := os.ReadDir(featurePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read feature directory: %w", err)
+	}
+
+	var risks []UnpushedBranch
+	configuredNames := e.configuredModuleNames()
+	for _, entry := range entries {
+		if !entry.IsDir() || !configuredNames[entry.Name()] {
+			continue
+		}
+		moduleName := entry.Name()
+		modulePath := filepath.Join(featurePath, moduleName)
+		repoPath := filepath.Join(e.Config.Workspace, moduleName)
+		if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+			continue
+		}
+		risks = e.appendUnpushedBranchRisk(ctx, risks, moduleName, repoPath, modulePath, dirName)
+	}
+
+	if _, err := os.Stat(e.Config.Workspace); !os.IsNotExist(err) {
+		risks = e.appendUnpushedBranchRisk(ctx, risks, "main", e.Config.Workspace, featurePath, dirName)
+	}
+	return risks, nil
+}
+
+// appendUnpushedBranchRisk 将单个 worktree 的未推送风险追加到列表中。
+func (e *Engine) appendUnpushedBranchRisk(ctx context.Context, risks []UnpushedBranch, name, repoPath, worktreePath, featureDirName string) []UnpushedBranch {
+	status, err := e.GitProxy.GetStatus(ctx, worktreePath)
+	if err != nil {
+		logger.Warn("无法读取 worktree 分支状态，跳过未推送检查: path=%s, err=%v", worktreePath, err)
+		return risks
+	}
+
+	branch := strings.TrimSpace(status.Branch)
+	if branch == "" || branch == "HEAD" || branchToFeatureDirName(branch) != featureDirName {
+		return risks
+	}
+
+	pushStatus, err := e.GitProxy.GetBranchPushStatus(ctx, repoPath, branch)
+	if err != nil {
+		return append(risks, UnpushedBranch{
+			Name:         name,
+			RepoPath:     repoPath,
+			WorktreePath: worktreePath,
+			Branch:       branch,
+			Reason:       err.Error(),
+		})
+	}
+	if pushStatus.IsPushed {
+		return risks
+	}
+	return append(risks, UnpushedBranch{
+		Name:         name,
+		RepoPath:     repoPath,
+		WorktreePath: worktreePath,
+		Branch:       branch,
+		RemoteRef:    pushStatus.RemoteRef,
+		AheadCount:   pushStatus.AheadCount,
+		Reason:       pushStatus.Reason,
+	})
+}
+
+// branchToFeatureDirName 将分支名转换成 feature 目录名。
+func branchToFeatureDirName(branch string) string {
+	return strings.ReplaceAll(branch, "/", "-")
+}
+
 // DeleteWorktree 删除 feature 工作树
 func (e *Engine) DeleteWorktree(ctx context.Context, feature string, force bool) error {
+	return e.DeleteWorktreeWithOptions(ctx, feature, force, DeleteOptions{})
+}
+
+// DeleteWorktreeWithOptions 删除 feature 工作树，并允许外层传入已确认的危险操作选项。
+func (e *Engine) DeleteWorktreeWithOptions(ctx context.Context, feature string, force bool, options DeleteOptions) error {
 	logger.Info("开始删除 feature: %s, force: %v", feature, force)
 
 	// 将 feature 名转换为目录名（feature/hello → feature-hello）
@@ -474,6 +571,16 @@ func (e *Engine) DeleteWorktree(ctx context.Context, feature string, force bool)
 		}
 		if len(dirty) > 0 {
 			return fmt.Errorf("cannot delete: uncommitted changes detected in %v: %w", dirty, errs.ErrDirtyWorktree)
+		}
+	}
+
+	if !options.AllowUnpushedBranches {
+		risks, err := e.CheckDeleteUnpushedBranches(ctx, feature)
+		if err != nil {
+			return err
+		}
+		if len(risks) > 0 {
+			return fmt.Errorf("cannot delete: unpushed branches detected: %w", errs.ErrUnpushedBranch)
 		}
 	}
 
@@ -1023,6 +1130,11 @@ func (e *Engine) AddModule(ctx context.Context, feature, moduleName string) erro
 
 // RemoveModule 为 feature 删除单个模块的 worktree
 func (e *Engine) RemoveModule(ctx context.Context, feature, moduleName string) error {
+	return e.RemoveModuleWithOptions(ctx, feature, moduleName, DeleteOptions{})
+}
+
+// RemoveModuleWithOptions 删除单个模块 worktree，并允许外层传入已确认的危险操作选项。
+func (e *Engine) RemoveModuleWithOptions(ctx context.Context, feature, moduleName string, options DeleteOptions) error {
 	logger.Info("为 feature %s 删除模块: %s", feature, moduleName)
 
 	// 将 feature 名转换为目录名（feature/hello → feature-hello）
@@ -1061,6 +1173,13 @@ func (e *Engine) RemoveModule(ctx context.Context, feature, moduleName string) e
 		}
 		logger.Info("成功删除模块目录: feature=%s, module=%s", feature, moduleName)
 		return nil
+	}
+
+	if !options.AllowUnpushedBranches {
+		risks := e.appendUnpushedBranchRisk(ctx, nil, moduleName, repoPath, modulePath, dirName)
+		if len(risks) > 0 {
+			return fmt.Errorf("cannot remove module %s: unpushed branches detected: %w", moduleName, errs.ErrUnpushedBranch)
+		}
 	}
 
 	if err := e.GitProxy.RemoveWorktreeAndBranch(ctx, repoPath, modulePath, dirName); err != nil {

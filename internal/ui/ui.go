@@ -136,15 +136,16 @@ func (e *FeatureEntry) GetDirtyCount() int {
 
 // TUI App 状态
 type App struct {
-	Engine       *engine.Engine
-	Envs         []core.WorktreeEnv
-	mainProject  *engine.MainProjectStatus
-	selected     int
-	menuSelected int    // 操作菜单选中项
-	state        string // "loading", "list", "menu", "modules", "confirm", "error"
-	feature      string
-	err          error
-	message      string
+	Engine           *engine.Engine
+	Envs             []core.WorktreeEnv
+	mainProject      *engine.MainProjectStatus
+	selected         int
+	menuSelected     int    // 操作菜单选中项
+	state            string // "loading", "list", "menu", "modules", "confirm", "confirm_unpushed", "error"
+	feature          string
+	err              error
+	message          string
+	unpushedBranches []engine.UnpushedBranch
 	// 配置化 App 打开工具
 	availableAppOpeners []config.AppOpener
 	appOpenersResolved  bool
@@ -262,6 +263,8 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleCreateModulesKey(msg)
 		case "confirm":
 			return m.handleConfirmKey(msg)
+		case "confirm_unpushed":
+			return m.handleUnpushedConfirmKey(msg)
 		case "error":
 			m.state = "list"
 			m.err = nil
@@ -578,20 +581,51 @@ func (m *App) openAppByName(appName string) {
 func (m *App) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "enter":
-		err := m.Engine.DeleteWorktree(context.Background(), m.feature, false)
+		branches, err := m.Engine.CheckDeleteUnpushedBranches(context.Background(), m.feature)
 		if err != nil {
 			m.err = err
 			m.state = "error"
-		} else {
-			m.message = "已删除 feature: " + m.feature
-			m.state = "loading"
-			m.selected = 0
-			return m, m.loadEnvs
+			return m, nil
 		}
+		if len(branches) > 0 {
+			m.unpushedBranches = branches
+			m.state = "confirm_unpushed"
+			return m, nil
+		}
+		return m.deleteFeature(false)
 	case "n", "esc":
 		m.state = "list"
 	}
 	return m, nil
+}
+
+// handleUnpushedConfirmKey 处理未推送分支风险确认。
+func (m *App) handleUnpushedConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "enter":
+		return m.deleteFeature(true)
+	case "n", "esc":
+		m.unpushedBranches = nil
+		m.state = "list"
+	}
+	return m, nil
+}
+
+// deleteFeature 执行 feature 删除并刷新列表。
+func (m *App) deleteFeature(allowUnpushedBranches bool) (tea.Model, tea.Cmd) {
+	err := m.Engine.DeleteWorktreeWithOptions(context.Background(), m.feature, false, engine.DeleteOptions{
+		AllowUnpushedBranches: allowUnpushedBranches,
+	})
+	if err != nil {
+		m.err = err
+		m.state = "error"
+		return m, nil
+	}
+	m.message = "已删除 feature: " + m.feature
+	m.unpushedBranches = nil
+	m.state = "loading"
+	m.selected = 0
+	return m, m.loadEnvs
 }
 
 // initModuleSelector 初始化模块选择器
@@ -918,6 +952,8 @@ func (m *App) View() string {
 		return m.renderCreateModules()
 	case "confirm":
 		return m.renderConfirm()
+	case "confirm_unpushed":
+		return m.renderUnpushedConfirm()
 	case "error":
 		return m.renderError()
 	default:
@@ -1019,6 +1055,24 @@ func (m *App) renderConfirm() string {
 	s.WriteString("\n\n")
 	s.WriteString(fmt.Sprintf("确定要删除 feature「%s」吗？\n", m.feature))
 	s.WriteString(itemStyle.Render("按 y 确认，n 取消"))
+	s.WriteString("\n\n")
+	return s.String()
+}
+
+func (m *App) renderUnpushedConfirm() string {
+	var s strings.Builder
+	s.WriteString(headerStyle.Render("确认删除未推送分支"))
+	s.WriteString("\n\n")
+	s.WriteString(fmt.Sprintf("feature「%s」包含尚未确认推送到远程的本地分支：\n\n", m.feature))
+	for _, branch := range m.unpushedBranches {
+		reason := branch.Reason
+		if reason == "" {
+			reason = "not pushed"
+		}
+		s.WriteString(fmt.Sprintf("- %s: %s (%s)\n", branch.Name, branch.Branch, reason))
+	}
+	s.WriteString("\n")
+	s.WriteString(itemStyle.Render("按 y 删除本地分支，n 取消"))
 	s.WriteString("\n\n")
 	return s.String()
 }

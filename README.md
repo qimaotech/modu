@@ -139,6 +139,7 @@ modu info my-feature
 # 删除 worktree
 modu delete my-feature
 modu delete my-feature --force  # 强制删除（跳过脏检查）
+modu delete my-feature --allow-unpushed  # 确认删除未推送到远端的本地分支
 
 # 设置默认选中的模块（创建 feature 时会默认选中这些模块）
 modu default-select
