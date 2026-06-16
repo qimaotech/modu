@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/qimaotech/modu/internal/config"
+	"github.com/spf13/cobra"
 )
 
 func TestIsInteractiveTerminal(t *testing.T) {
@@ -196,6 +199,39 @@ func TestRunCreate_FilterExistingModules(t *testing.T) {
 			t.Errorf("expected filtered[0] 'module3', got %s", filtered[0])
 		}
 	})
+}
+
+func TestResolveCreateBase(t *testing.T) {
+	t.Run("未显式指定base时使用配置默认分支", func(t *testing.T) {
+		cmd := newCreateBaseTestCommand()
+		cfg := &config.Config{DefaultBase: "master"}
+
+		base := resolveCreateBase(cmd, cfg)
+
+		if base != "master" {
+			t.Errorf("expected base master, got %s", base)
+		}
+	})
+
+	t.Run("显式指定base时覆盖配置默认分支", func(t *testing.T) {
+		cmd := newCreateBaseTestCommand()
+		if err := cmd.Flags().Set("base", "release"); err != nil {
+			t.Fatalf("set base flag: %v", err)
+		}
+		cfg := &config.Config{DefaultBase: "master"}
+
+		base := resolveCreateBase(cmd, cfg)
+
+		if base != "release" {
+			t.Errorf("expected base release, got %s", base)
+		}
+	})
+}
+
+func newCreateBaseTestCommand() *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Flags().String("base", "develop", "基准分支")
+	return cmd
 }
 
 // 辅助函数和测试用结构体
