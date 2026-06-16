@@ -267,10 +267,10 @@ func loadConfig() *engine.Engine {
 
 func runCreate(cmd *cobra.Command, args []string) {
 	feature := args[0]
-	base, _ := cmd.Flags().GetString("base")
 	modules, _ := cmd.Flags().GetStringSlice("modules")
 
 	eng := loadConfig()
+	base := resolveCreateBase(cmd, eng.Config)
 
 	// 检查 feature 是否已存在
 	featurePath := filepath.Join(eng.Config.WorktreeRoot, feature)
@@ -403,6 +403,14 @@ func runCreate(cmd *cobra.Command, args []string) {
 	}
 
 	fmt.Print(formatter.FormatCreateResponse(feature, []output.Result{}, nil))
+}
+
+func resolveCreateBase(cmd *cobra.Command, cfg *config.Config) string {
+	base, _ := cmd.Flags().GetString("base")
+	if !cmd.Flags().Changed("base") && cfg.DefaultBase != "" {
+		return cfg.DefaultBase
+	}
+	return base
 }
 
 func runDelete(cmd *cobra.Command, args []string) {
