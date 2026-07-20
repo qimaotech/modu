@@ -10,6 +10,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func TestNewDeleteCommand_RequiresSingleFeature(t *testing.T) {
+	cmd := newDeleteCommand()
+
+	if err := cmd.Args(cmd, nil); err == nil {
+		t.Fatal("无参数应报错，批量删除入口位于主 TUI")
+	}
+	if err := cmd.Args(cmd, []string{"feature-a"}); err != nil {
+		t.Fatalf("单个 feature 应受支持: %v", err)
+	}
+	if err := cmd.Args(cmd, []string{"feature-a", "feature-b"}); err == nil {
+		t.Fatal("两个位置参数应报错")
+	}
+}
+
 func TestIsInteractiveTerminal(t *testing.T) {
 	t.Run("在测试环境中返回false", func(t *testing.T) {
 		// 测试环境通常不是交互式终端

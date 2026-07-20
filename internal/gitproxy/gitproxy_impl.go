@@ -8,9 +8,15 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/qimaotech/modu/internal/errors"
 	"github.com/qimaotech/modu/internal/logger"
+)
+
+const (
+	remoteBranchCheckTimeout = 10 * time.Second
+	gitCommandWaitDelay      = 500 * time.Millisecond
 )
 
 // GitProxy Git 操作真实实现
@@ -99,23 +105,24 @@ func branchToFeatureDirSlug(branch string) string {
 	return strings.ReplaceAll(branch, "/", "-")
 }
 
-// RemoveWorktreeAndBranch 删除 worktree；仅当当前检出分支的 slug 与 featureDirName 一致时才删除该分支
-func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktreePath, featureDirName string) error {
+// RemoveWorktreeAndBranch 删除 worktree；非致命分支清理警告由结果返回，避免后台任务直接写终端。
+func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktreePath, featureDirName string) (RemoveWorktreeResult, error) {
 	logger.Debug("RemoveWorktreeAndBranch: repo=%s, featureDirName=%s, path=%s", repoPath, featureDirName, worktreePath)
+	result := RemoveWorktreeResult{}
 
 	status, err := g.GetStatus(ctx, worktreePath)
 	branchToDelete := ""
 	if err != nil {
 		logger.Warn("无法读取 worktree 分支状态，跳过删除分支: path=%s, err=%v", worktreePath, err)
-		fmt.Printf("Warning: skip branch delete (cannot read status): %s\n", worktreePath)
+		result.Warnings = append(result.Warnings, "skip branch delete (cannot read status): "+worktreePath)
 	} else {
 		b := strings.TrimSpace(status.Branch)
 		if b == "" || b == "HEAD" {
 			logger.Warn("worktree 无有效分支名（detached HEAD 等），跳过删除分支: path=%s", worktreePath)
-			fmt.Printf("Warning: skip branch delete (detached or unknown HEAD): %s\n", worktreePath)
+			result.Warnings = append(result.Warnings, "skip branch delete (detached or unknown HEAD): "+worktreePath)
 		} else if branchToFeatureDirSlug(b) != featureDirName {
 			logger.Warn("当前分支 %s（slug=%s）与 feature 目录名 %s 不一致，跳过删除分支", b, branchToFeatureDirSlug(b), featureDirName)
-			fmt.Printf("Warning: skip branch delete: branch %q slug does not match feature dir %q\n", b, featureDirName)
+			result.Warnings = append(result.Warnings, fmt.Sprintf("skip branch delete: branch %q slug does not match feature dir %q", b, featureDirName))
 		} else {
 			branchToDelete = b
 		}
@@ -129,15 +136,17 @@ func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktr
 		// 如果 worktree remove 失败，尝试直接删除目录
 		if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
 			logger.Error("删除目录失败: path=%s, error=%v", worktreePath, rmErr)
-			return fmt.Errorf("[git worktree remove] failed to remove worktree at %s: %w, output: %s", worktreePath, errors.ErrGitExec, string(out))
+			return result, fmt.Errorf("[git worktree remove] failed to remove worktree at %s: %w, output: %s", worktreePath, errors.ErrGitExec, string(out))
 		}
 		logger.Info("直接删除目录成功: %s", worktreePath)
+		result.Warnings = append(result.Warnings, "git worktree remove failed; removed directory directly: "+worktreePath)
 	}
 
 	// 先 prune 清理过期的 worktree 引用
 	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "prune")
 	if err := cmd.Run(); err != nil {
 		logger.Warn("git worktree prune 失败: %v", err)
+		result.Warnings = append(result.Warnings, fmt.Sprintf("git worktree prune failed: %v", err))
 	} else {
 		logger.Info("git worktree prune 成功")
 	}
@@ -149,13 +158,13 @@ func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktr
 		out, err = cmd.CombinedOutput()
 		if err != nil {
 			logger.Warn("删除分支失败（可能不存在）: branch=%s, error=%s", branchToDelete, string(out))
-			fmt.Printf("Warning: failed to delete branch %s: %s\n", branchToDelete, string(out))
+			return result, fmt.Errorf("failed to delete branch %s: %w, output: %s", branchToDelete, errors.ErrGitExec, strings.TrimSpace(string(out)))
 		} else {
 			logger.Info("删除分支成功: %s", branchToDelete)
 		}
 	}
 
-	return nil
+	return result, nil
 }
 
 // ListWorktrees 列出所有工作树
@@ -246,7 +255,11 @@ func (g *GitProxy) BranchExists(ctx context.Context, repoPath, branch string) bo
 
 // RemoteBranchExists 检查远端仓库是否存在指定分支
 func (g *GitProxy) RemoteBranchExists(ctx context.Context, repoURL, branch string) bool {
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", repoURL, "refs/heads/"+branch)
+	checkContext, cancel := context.WithTimeout(ctx, remoteBranchCheckTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(checkContext, "git", "ls-remote", "--heads", repoURL, "refs/heads/"+branch)
+	cmd.WaitDelay = gitCommandWaitDelay
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return false

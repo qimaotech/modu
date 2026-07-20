@@ -23,7 +23,7 @@ type MockGitClient struct {
 	CreateWorktreeFromRemoteBranchFunc   func(ctx context.Context, repoPath, branch, worktreePath string) error
 	GetStatusFunc                        func(ctx context.Context, path string) (gitproxy.Status, error)
 	RemoveWorktreeFunc                   func(ctx context.Context, path string) error
-	RemoveWorktreeAndBranchFunc          func(ctx context.Context, repoPath, worktreePath, featureDirName string) error
+	RemoveWorktreeAndBranchFunc          func(ctx context.Context, repoPath, worktreePath, featureDirName string) (gitproxy.RemoveWorktreeResult, error)
 	ListWorktreesFunc                    func(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error)
 	FetchFunc                            func(ctx context.Context, repoPath string) error
 	RebaseFunc                           func(ctx context.Context, path string) error
@@ -64,11 +64,11 @@ func (m *MockGitClient) RemoveWorktree(ctx context.Context, path string) error {
 	return nil
 }
 
-func (m *MockGitClient) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktreePath, featureDirName string) error {
+func (m *MockGitClient) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktreePath, featureDirName string) (gitproxy.RemoveWorktreeResult, error) {
 	if m.RemoveWorktreeAndBranchFunc != nil {
 		return m.RemoveWorktreeAndBranchFunc(ctx, repoPath, worktreePath, featureDirName)
 	}
-	return nil
+	return gitproxy.RemoveWorktreeResult{}, nil
 }
 
 func (m *MockGitClient) ListWorktrees(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error) {
@@ -1045,7 +1045,7 @@ func TestDeleteWorktreeWithOptions_AllowsConfirmedUnpushedBranches(t *testing.T)
 		Reason:     "1 local commits not pushed",
 	})
 
-	err := engine.DeleteWorktreeWithOptions(context.Background(), "feat-a", false, DeleteOptions{
+	_, err := engine.DeleteWorktreeWithOptions(context.Background(), "feat-a", false, DeleteOptions{
 		AllowUnpushedBranches: true,
 	})
 	if err != nil {
@@ -1053,6 +1053,240 @@ func TestDeleteWorktreeWithOptions_AllowsConfirmedUnpushedBranches(t *testing.T)
 	}
 	if *removedCount != 2 {
 		t.Fatalf("expected module and main removal, got %d", *removedCount)
+	}
+}
+
+func TestDeleteWorktreesWithOptions_NormalDeleteChecksDirtyAndContinues(t *testing.T) {
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "workspace")
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	for _, path := range []string{
+		workspace,
+		filepath.Join(workspace, "module1"),
+		filepath.Join(worktreeRoot, "dirty-feature", "module1"),
+		filepath.Join(worktreeRoot, "clean-feature", "module1"),
+	} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removeCalls := 0
+	client := &MockGitClient{
+		GetStatusFunc: func(ctx context.Context, path string) (gitproxy.Status, error) {
+			return gitproxy.Status{
+				Branch:  filepath.Base(filepath.Dir(path)),
+				IsDirty: strings.Contains(path, "dirty-feature"),
+			}, nil
+		},
+		RemoveWorktreeAndBranchFunc: func(ctx context.Context, repoPath, worktreePath, featureDirName string) (gitproxy.RemoveWorktreeResult, error) {
+			removeCalls++
+			return gitproxy.RemoveWorktreeResult{}, nil
+		},
+	}
+	eng := NewWithClient(&config.Config{
+		Workspace:    workspace,
+		WorktreeRoot: worktreeRoot,
+		StrictDirty:  true,
+		Modules:      []config.Module{{Name: "module1"}},
+	}, client)
+
+	succeeded, failed, _ := eng.DeleteWorktreesWithOptions(
+		context.Background(),
+		[]string{"dirty-feature", "clean-feature"},
+		false,
+		DeleteOptions{AllowUnpushedBranches: true},
+	)
+
+	if len(succeeded) != 1 || succeeded[0] != "clean-feature" {
+		t.Fatalf("succeeded = %v, 期望 [clean-feature]", succeeded)
+	}
+	if !errors.Is(failed["dirty-feature"], errs.ErrDirtyWorktree) {
+		t.Fatalf("dirty-feature error = %v, 期望 ErrDirtyWorktree", failed["dirty-feature"])
+	}
+	if removeCalls != 2 {
+		t.Fatalf("只应删除 clean-feature 的模块和主项目，removeCalls=%d", removeCalls)
+	}
+}
+
+// TestDeleteWorktreesWithOptions_ReportsRemovalFailure 验证底层删除失败不会被统计为成功。
+func TestDeleteWorktreesWithOptions_ReportsRemovalFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "workspace")
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	featurePath := filepath.Join(worktreeRoot, "feature-a")
+	modulePath := filepath.Join(featurePath, "module1")
+	for _, path := range []string{workspace, filepath.Join(workspace, "module1"), modulePath} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	client := &MockGitClient{
+		GetStatusFunc: func(ctx context.Context, path string) (gitproxy.Status, error) {
+			return gitproxy.Status{Branch: "feature-a"}, nil
+		},
+		RemoveWorktreeAndBranchFunc: func(ctx context.Context, repoPath, worktreePath, featureDirName string) (gitproxy.RemoveWorktreeResult, error) {
+			if worktreePath == modulePath {
+				return gitproxy.RemoveWorktreeResult{}, errors.New("simulated module removal failure")
+			}
+			return gitproxy.RemoveWorktreeResult{}, nil
+		},
+	}
+	eng := NewWithClient(&config.Config{
+		Workspace:    workspace,
+		WorktreeRoot: worktreeRoot,
+		StrictDirty:  false,
+		Modules:      []config.Module{{Name: "module1"}},
+	}, client)
+
+	succeeded, failed, _ := eng.DeleteWorktreesWithOptions(
+		context.Background(),
+		[]string{"feature-a"},
+		true,
+		DeleteOptions{AllowUnpushedBranches: true},
+	)
+
+	if len(succeeded) != 0 {
+		t.Fatalf("删除阶段失败时不应统计成功，succeeded=%v", succeeded)
+	}
+	deleteErr := failed["feature-a"]
+	if !errors.Is(deleteErr, errs.ErrPartialFailure) {
+		t.Fatalf("删除阶段失败应返回 ErrPartialFailure，got %v", deleteErr)
+	}
+	if !strings.Contains(deleteErr.Error(), "module1") || !strings.Contains(deleteErr.Error(), "simulated module removal failure") {
+		t.Fatalf("错误应包含失败模块和原始原因，got %v", deleteErr)
+	}
+}
+
+// TestDeleteWorktreesWithOptions_ReturnsRemovalWarnings 验证非致命警告按 feature 返回给展示层。
+func TestDeleteWorktreesWithOptions_ReturnsRemovalWarnings(t *testing.T) {
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "workspace")
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	featurePath := filepath.Join(worktreeRoot, "feature-a")
+	for _, path := range []string{workspace, filepath.Join(workspace, "module1"), filepath.Join(featurePath, "module1")} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	client := &MockGitClient{
+		GetStatusFunc: func(ctx context.Context, path string) (gitproxy.Status, error) {
+			return gitproxy.Status{Branch: "feature-a"}, nil
+		},
+		RemoveWorktreeAndBranchFunc: func(ctx context.Context, repoPath, worktreePath, featureDirName string) (gitproxy.RemoveWorktreeResult, error) {
+			return gitproxy.RemoveWorktreeResult{Warnings: []string{"branch mismatch"}}, nil
+		},
+	}
+	eng := NewWithClient(&config.Config{
+		Workspace:    workspace,
+		WorktreeRoot: worktreeRoot,
+		StrictDirty:  false,
+		Modules:      []config.Module{{Name: "module1"}},
+	}, client)
+
+	succeeded, failed, warnings := eng.DeleteWorktreesWithOptions(
+		context.Background(),
+		[]string{"feature-a"},
+		true,
+		DeleteOptions{AllowUnpushedBranches: true},
+	)
+
+	if len(succeeded) != 1 || len(failed) != 0 {
+		t.Fatalf("删除结果异常: succeeded=%v failed=%v", succeeded, failed)
+	}
+	featureWarnings := warnings["feature-a"]
+	if len(featureWarnings) != 2 || !strings.Contains(featureWarnings[0], "module module1") || !strings.Contains(featureWarnings[1], "main project") {
+		t.Fatalf("警告应包含模块和主项目上下文，got %v", featureWarnings)
+	}
+}
+
+func TestDeleteWorktreeWithOptions_NormalDeleteBlocksDirtyMainProject(t *testing.T) {
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "workspace")
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	featurePath := filepath.Join(worktreeRoot, "dirty-main")
+	for _, path := range []string{workspace, featurePath} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removeCalls := 0
+	client := &MockGitClient{
+		GetStatusFunc: func(ctx context.Context, path string) (gitproxy.Status, error) {
+			return gitproxy.Status{Branch: "dirty-main", IsDirty: path == featurePath}, nil
+		},
+		RemoveWorktreeAndBranchFunc: func(ctx context.Context, repoPath, worktreePath, featureDirName string) (gitproxy.RemoveWorktreeResult, error) {
+			removeCalls++
+			return gitproxy.RemoveWorktreeResult{}, nil
+		},
+	}
+	eng := NewWithClient(&config.Config{
+		Workspace:    workspace,
+		WorktreeRoot: worktreeRoot,
+		StrictDirty:  true,
+	}, client)
+
+	_, err := eng.DeleteWorktreeWithOptions(
+		context.Background(),
+		"dirty-main",
+		false,
+		DeleteOptions{AllowUnpushedBranches: true},
+	)
+
+	if !errors.Is(err, errs.ErrDirtyWorktree) {
+		t.Fatalf("error = %v, 期望 ErrDirtyWorktree", err)
+	}
+	if removeCalls != 0 {
+		t.Fatalf("主项目脏时不应执行删除，removeCalls=%d", removeCalls)
+	}
+}
+
+func TestDeleteWorktreesWithOptions_ForceDeleteSkipsDirtyCheck(t *testing.T) {
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "workspace")
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	for _, path := range []string{
+		workspace,
+		filepath.Join(workspace, "module1"),
+		filepath.Join(worktreeRoot, "dirty-feature", "module1"),
+	} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removeCalls := 0
+	client := &MockGitClient{
+		GetStatusFunc: func(ctx context.Context, path string) (gitproxy.Status, error) {
+			return gitproxy.Status{Branch: "dirty-feature", IsDirty: true}, nil
+		},
+		RemoveWorktreeAndBranchFunc: func(ctx context.Context, repoPath, worktreePath, featureDirName string) (gitproxy.RemoveWorktreeResult, error) {
+			removeCalls++
+			return gitproxy.RemoveWorktreeResult{}, nil
+		},
+	}
+	eng := NewWithClient(&config.Config{
+		Workspace:    workspace,
+		WorktreeRoot: worktreeRoot,
+		StrictDirty:  true,
+		Modules:      []config.Module{{Name: "module1"}},
+	}, client)
+
+	succeeded, failed, _ := eng.DeleteWorktreesWithOptions(
+		context.Background(),
+		[]string{"dirty-feature"},
+		true,
+		DeleteOptions{AllowUnpushedBranches: true},
+	)
+
+	if len(failed) != 0 || len(succeeded) != 1 || succeeded[0] != "dirty-feature" {
+		t.Fatalf("强制删除结果异常: succeeded=%v failed=%v", succeeded, failed)
+	}
+	if removeCalls != 2 {
+		t.Fatalf("强制删除应移除模块和主项目，removeCalls=%d", removeCalls)
 	}
 }
 
@@ -1094,9 +1328,9 @@ func newDeletePreflightTestEngine(t *testing.T, pushStatus gitproxy.BranchPushSt
 		GetBranchPushStatusFunc: func(ctx context.Context, repoPath, branch string) (gitproxy.BranchPushStatus, error) {
 			return pushStatus, nil
 		},
-		RemoveWorktreeAndBranchFunc: func(ctx context.Context, repoPath, worktreePath, featureDirName string) error {
+		RemoveWorktreeAndBranchFunc: func(ctx context.Context, repoPath, worktreePath, featureDirName string) (gitproxy.RemoveWorktreeResult, error) {
 			removedCount++
-			return nil
+			return gitproxy.RemoveWorktreeResult{}, nil
 		},
 	}
 	return NewWithClient(cfg, mock), mock, &removedCount

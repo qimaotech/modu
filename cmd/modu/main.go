@@ -91,14 +91,7 @@ func main() {
 	createCmd.Flags().StringSlice("modules", nil, "指定要创建的模块（逗号分隔），默认创建所有模块")
 
 	// delete 命令
-	deleteCmd := &cobra.Command{
-		Use:   "delete <feature>",
-		Short: "删除 feature 工作树",
-		Args:  cobra.ExactArgs(1),
-		Run:   runDelete,
-	}
-	deleteCmd.Flags().BoolP("force", "f", false, "强制删除（跳过脏检查）")
-	deleteCmd.Flags().Bool("allow-unpushed", false, "允许删除未推送到远端的本地分支")
+	deleteCmd := newDeleteCommand()
 
 	// default-select 命令 - 设置默认选中的模块
 	defaultSelectCmd := &cobra.Command{
@@ -219,6 +212,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func newDeleteCommand() *cobra.Command {
+	deleteCmd := &cobra.Command{
+		Use:   "delete <feature>",
+		Short: "删除 feature 工作树",
+		Args:  cobra.ExactArgs(1),
+		Run:   runDelete,
+	}
+	deleteCmd.Flags().BoolP("force", "f", false, "强制删除（跳过脏检查）")
+	deleteCmd.Flags().Bool("allow-unpushed", false, "允许删除未推送到远端的本地分支")
+	return deleteCmd
 }
 
 func loadConfig() *engine.Engine {
@@ -381,9 +386,13 @@ func runCreate(cmd *cobra.Command, args []string) {
 			modulePath := filepath.Join(featurePath, name)
 			repoPath := filepath.Join(eng.Config.Workspace, name)
 			// 删除 worktree 和分支
-			if err := eng.GitProxy.RemoveWorktreeAndBranch(cmd.Context(), repoPath, modulePath, engine.FeatureToDirName(feature)); err != nil {
+			removeResult, err := eng.GitProxy.RemoveWorktreeAndBranch(cmd.Context(), repoPath, modulePath, engine.FeatureToDirName(feature))
+			if err != nil {
 				fmt.Printf("  - %s: 删除失败 %v\n", name, err)
 			} else {
+				for _, warning := range removeResult.Warnings {
+					fmt.Printf("  - %s: 警告 %s\n", name, warning)
+				}
 				fmt.Printf("  - %s: 已删除（含分支）\n", name)
 			}
 		}
@@ -437,12 +446,15 @@ func runDelete(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	err = eng.DeleteWorktreeWithOptions(cmd.Context(), feature, force, engine.DeleteOptions{
+	deleteResult, err := eng.DeleteWorktreeWithOptions(cmd.Context(), feature, force, engine.DeleteOptions{
 		AllowUnpushedBranches: allowUnpushedBranches,
 	})
 	if err != nil {
 		fmt.Print(formatter.FormatError(errors.Code(err), err.Error(), nil))
 		os.Exit(1)
+	}
+	for _, warning := range deleteResult.Warnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
 	}
 
 	fmt.Print(formatter.FormatDeleteResponse(feature, nil))

@@ -2,6 +2,8 @@ package ui
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"github.com/qimaotech/modu/internal/config"
 	"github.com/qimaotech/modu/internal/core"
 	"github.com/qimaotech/modu/internal/engine"
+	errs "github.com/qimaotech/modu/internal/errors"
 	"github.com/qimaotech/modu/internal/gitproxy"
 )
 
@@ -341,6 +344,394 @@ func TestModuleSelector_View_NonEmpty(t *testing.T) {
 	}
 }
 
+func TestWorktreeSelector_NormalDelete(t *testing.T) {
+	selector := NewWorktreeSelector([]core.WorktreeEnv{
+		{Name: "feature-a"},
+		{Name: "feature-b"},
+	})
+
+	selector.Update(tea.KeyMsg{Type: tea.KeySpace})
+	selector.Update(tea.KeyMsg{Type: tea.KeyDown})
+	selector.Update(tea.KeyMsg{Type: tea.KeySpace})
+	_, cmd := selector.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+
+	if cmd == nil {
+		t.Fatal("按 d 应确认普通删除并退出选择器")
+	}
+	if selector.Force() {
+		t.Fatal("普通删除不应跳过脏检查")
+	}
+	selected := selector.SelectedFeatures()
+	if len(selected) != 2 || selected[0] != "feature-a" || selected[1] != "feature-b" {
+		t.Fatalf("SelectedFeatures() = %v, 期望 [feature-a feature-b]", selected)
+	}
+}
+
+func TestWorktreeSelector_ForceDelete(t *testing.T) {
+	selector := NewWorktreeSelector([]core.WorktreeEnv{{Name: "dirty-feature"}})
+	selector.Update(tea.KeyMsg{Type: tea.KeySpace})
+	_, cmd := selector.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+
+	if cmd == nil {
+		t.Fatal("按 f 应确认强制删除并退出选择器")
+	}
+	if !selector.Force() {
+		t.Fatal("强制删除应跳过脏检查")
+	}
+}
+
+func TestWorktreeSelector_Quit(t *testing.T) {
+	selector := NewWorktreeSelector([]core.WorktreeEnv{{Name: "feature-a"}})
+	_, cmd := selector.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+
+	if cmd == nil {
+		t.Fatal("按 q 应退出选择器")
+	}
+	if !selector.Quitting() {
+		t.Fatal("退出选择器后 Quitting() 应为 true")
+	}
+}
+
+func TestWorktreeSelector_ViewShowsWorktreesAndDeleteKeys(t *testing.T) {
+	selector := NewWorktreeSelector([]core.WorktreeEnv{
+		{
+			Name: "clean-feature",
+			Modules: []core.ModuleStatus{
+				{Name: "module-a", IsDirty: false},
+			},
+		},
+		{
+			Name: "dirty-feature",
+			Modules: []core.ModuleStatus{
+				{Name: "module-b", IsDirty: true},
+			},
+		},
+	})
+
+	view := selector.View()
+	for _, expected := range []string{"clean-feature", "dirty-feature", "clean", "1 dirty", "d 普通删除", "f 强制删除"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("View() 未包含 %q: %s", expected, view)
+		}
+	}
+	if !strings.Contains(view, successStyle.Render("clean")) {
+		t.Fatalf("clean 状态应使用绿色样式: %q", view)
+	}
+	if !strings.Contains(view, errorStyle.Render("1 dirty")) {
+		t.Fatalf("dirty 状态应使用红色样式: %q", view)
+	}
+}
+
+// TestWorktreeSelector_ViewUsesMainListDirtyScope 验证批量页与主列表一样只统计模块脏状态。
+func TestWorktreeSelector_ViewUsesMainListDirtyScope(t *testing.T) {
+	worktree := core.WorktreeEnv{
+		Name:        "feature-main-dirty",
+		MainProject: &core.ModuleStatus{Name: "modu", IsDirty: true},
+		Modules:     []core.ModuleStatus{{Name: "module-a", IsDirty: false}},
+	}
+	selector := NewWorktreeSelector([]core.WorktreeEnv{worktree})
+
+	view := selector.View()
+	if !strings.Contains(view, successStyle.Render("clean")) {
+		t.Fatalf("批量页应按主列表口径显示 clean: %q", view)
+	}
+	if strings.Contains(view, errorStyle.Render("1 dirty")) {
+		t.Fatalf("批量页不应单独统计主项目 dirty: %q", view)
+	}
+}
+
+func TestApp_ListKey_OpensBatchDeleteSelection(t *testing.T) {
+	app := &App{
+		state: "list",
+		Envs: []core.WorktreeEnv{
+			{Name: "feature-a"},
+			{Name: "feature-b"},
+		},
+	}
+
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
+
+	if app.state != "batch_delete" {
+		t.Fatalf("按 b 后 state = %q，期望 batch_delete", app.state)
+	}
+	view := app.View()
+	if !strings.Contains(view, "feature-a") || !strings.Contains(view, "feature-b") {
+		t.Fatalf("批量删除页应展示当前 worktree: %s", view)
+	}
+}
+
+func TestApp_ListKey_UppercaseDDoesNotOpenBatchDelete(t *testing.T) {
+	app := &App{
+		state: "list",
+		Envs:  []core.WorktreeEnv{{Name: "feature-a"}},
+	}
+
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+
+	if app.state != "list" {
+		t.Fatalf("大写 D 不应触发批量删除，state=%q", app.state)
+	}
+}
+
+func TestApp_BatchDelete_NormalModeRequiresConfirmation(t *testing.T) {
+	app := &App{
+		state: "list",
+		Envs: []core.WorktreeEnv{
+			{Name: "feature-a"},
+			{Name: "feature-b"},
+		},
+	}
+
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
+	app.Update(tea.KeyMsg{Type: tea.KeySpace})
+	app.Update(tea.KeyMsg{Type: tea.KeyDown})
+	app.Update(tea.KeyMsg{Type: tea.KeySpace})
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+
+	if app.state != "confirm_batch_delete" {
+		t.Fatalf("按 d 后 state = %q，期望 confirm_batch_delete", app.state)
+	}
+	view := app.View()
+	for _, expected := range []string{"确认批量删除", "feature-a", "feature-b", "按 y 确认"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("批量删除确认页未包含 %q: %s", expected, view)
+		}
+	}
+}
+
+func TestApp_BatchDelete_ForceConfirmationShowsColoredStatus(t *testing.T) {
+	app := &App{
+		state: "list",
+		Envs: []core.WorktreeEnv{
+			{Name: "clean-feature"},
+			{
+				Name: "dirty-feature",
+				Modules: []core.ModuleStatus{
+					{Name: "module1", IsDirty: true},
+				},
+			},
+		},
+	}
+
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
+	app.Update(tea.KeyMsg{Type: tea.KeySpace})
+	app.Update(tea.KeyMsg{Type: tea.KeyDown})
+	app.Update(tea.KeyMsg{Type: tea.KeySpace})
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+
+	if app.state != "confirm_batch_delete" || !app.batchDeleteForce {
+		t.Fatalf("按 f 后应进入批量强制删除确认页: state=%q force=%v", app.state, app.batchDeleteForce)
+	}
+	view := app.View()
+	for _, expected := range []string{
+		fmt.Sprintf("- clean-feature (%s)", successStyle.Render("clean")),
+		fmt.Sprintf("- dirty-feature (%s)", errorStyle.Render("1 dirty")),
+		"跳过脏检查和未推送分支保护",
+	} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("批量强制删除确认页未显示带颜色的状态 %q: %s", expected, view)
+		}
+	}
+}
+
+func TestApp_BatchDelete_CancelConfirmationReturnsToSelection(t *testing.T) {
+	app := &App{
+		state:       "confirm_batch_delete",
+		batchDelete: NewWorktreeSelector([]core.WorktreeEnv{{Name: "feature-a"}}),
+	}
+	app.batchDelete.selected[0] = true
+
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+
+	if app.state != "batch_delete" {
+		t.Fatalf("取消确认后 state = %q，期望返回 batch_delete", app.state)
+	}
+	if got := app.batchDelete.SelectedFeatures(); len(got) != 1 || got[0] != "feature-a" {
+		t.Fatalf("取消确认后应保留选择，got %v", got)
+	}
+}
+
+func TestApp_BatchDelete_ConfirmExecutesNormalDelete(t *testing.T) {
+	app, fake, worktreeRoot := newBatchDeleteTestApp(t)
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd == nil {
+		t.Fatal("确认批量删除后应返回执行命令")
+	}
+	if fake.removeCalls != 0 {
+		t.Fatalf("执行命令前不应删除，removeCalls=%d", fake.removeCalls)
+	}
+
+	msg := cmd()
+	done, ok := msg.(batchDeleteDoneMsg)
+	if !ok {
+		t.Fatalf("执行结果类型 = %T，期望 batchDeleteDoneMsg", msg)
+	}
+	_, refreshCmd := app.Update(done)
+
+	if fake.removeCalls != 2 {
+		t.Fatalf("只应删除 clean-feature 的模块和主项目，removeCalls=%d", fake.removeCalls)
+	}
+	if _, err := os.Stat(filepath.Join(worktreeRoot, "dirty-feature")); err != nil {
+		t.Fatalf("普通删除应保留 dirty-feature: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(worktreeRoot, "clean-feature")); !os.IsNotExist(err) {
+		t.Fatalf("clean-feature 应已删除")
+	}
+	if refreshCmd == nil || app.state != "loading" {
+		t.Fatalf("删除完成后应刷新列表: state=%q", app.state)
+	}
+	expectedMessage := "批量删除完成，成功 1 个\n删除失败：\n- dirty-feature：存在未提交修改"
+	if app.message != expectedMessage || !app.messageIsError {
+		t.Fatalf("批量删除结果消息异常: message=%q isError=%v", app.message, app.messageIsError)
+	}
+}
+
+func TestApp_BatchDelete_ConfirmExecutesForceDelete(t *testing.T) {
+	app, fake, worktreeRoot := newBatchDeleteTestApp(t)
+	app.batchDeleteForce = true
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd == nil {
+		t.Fatal("确认批量强制删除后应返回执行命令")
+	}
+	done, ok := cmd().(batchDeleteDoneMsg)
+	if !ok {
+		t.Fatal("批量强制删除应返回 batchDeleteDoneMsg")
+	}
+	app.Update(done)
+
+	if fake.removeCalls != 4 {
+		t.Fatalf("应删除两个 feature 的模块和主项目，removeCalls=%d", fake.removeCalls)
+	}
+	for _, feature := range []string{"dirty-feature", "clean-feature"} {
+		if _, err := os.Stat(filepath.Join(worktreeRoot, feature)); !os.IsNotExist(err) {
+			t.Fatalf("%s 应已删除", feature)
+		}
+	}
+	if app.message != "批量删除完成，成功 2 个" || app.messageIsError {
+		t.Fatalf("批量强制删除结果消息异常: message=%q isError=%v", app.message, app.messageIsError)
+	}
+}
+
+func TestFormatBatchDeleteResult_ListsFailureReasonsInSelectionOrder(t *testing.T) {
+	done := batchDeleteDoneMsg{
+		features:  []string{"feature-z", "feature-a", "feature-ok"},
+		succeeded: []string{"feature-ok"},
+		failed: map[string]error{
+			"feature-z": fmt.Errorf("dirty: %w", errs.ErrDirtyWorktree),
+			"feature-a": errors.New("remove worktree failed"),
+		},
+	}
+
+	expected := "批量删除完成，成功 1 个\n删除失败：\n" +
+		"- feature-z：存在未提交修改\n" +
+		"- feature-a：remove worktree failed"
+	if got := formatBatchDeleteResult(done); got != expected {
+		t.Fatalf("formatBatchDeleteResult() = %q，期望 %q", got, expected)
+	}
+}
+
+// TestApp_BatchDelete_RendersRemovalWarnings 验证后台删除警告通过消息返回并逐行展示。
+func TestApp_BatchDelete_RendersRemovalWarnings(t *testing.T) {
+	app, fake, _ := newBatchDeleteTestApp(t)
+	fake.removeResult = gitproxy.RemoveWorktreeResult{Warnings: []string{"branch mismatch"}}
+
+	done, ok := app.executeBatchDelete([]string{"clean-feature"}, true)().(batchDeleteDoneMsg)
+	if !ok {
+		t.Fatal("批量删除应返回 batchDeleteDoneMsg")
+	}
+	got := formatBatchDeleteResult(done)
+	want := "批量删除完成，成功 1 个\n警告：\n" +
+		"- clean-feature：module module1: branch mismatch\n" +
+		"- clean-feature：main project: branch mismatch"
+	if got != want {
+		t.Fatalf("批量删除警告展示异常: got %q want %q", got, want)
+	}
+}
+
+// TestApp_BatchDelete_ReportsRemovalFailure 验证底层实际删除失败会进入失败详情而非成功计数。
+func TestApp_BatchDelete_ReportsRemovalFailure(t *testing.T) {
+	app, fake, _ := newBatchDeleteTestApp(t)
+	fake.removeErr = errors.New("simulated removal failure")
+
+	done, ok := app.executeBatchDelete([]string{"clean-feature"}, true)().(batchDeleteDoneMsg)
+	if !ok {
+		t.Fatal("批量删除应返回 batchDeleteDoneMsg")
+	}
+	if len(done.succeeded) != 0 || !errors.Is(done.failed["clean-feature"], errs.ErrPartialFailure) {
+		t.Fatalf("实际删除失败不应统计成功: succeeded=%v failed=%v", done.succeeded, done.failed)
+	}
+	result := formatBatchDeleteResult(done)
+	if !strings.Contains(result, "- clean-feature：") || !strings.Contains(result, "simulated removal failure") {
+		t.Fatalf("结果应展示失败 worktree 和底层原因: %q", result)
+	}
+}
+
+func newBatchDeleteTestApp(t *testing.T) (*App, *uiFakeGitClient, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "workspace")
+	worktreeRoot := filepath.Join(tmpDir, "worktrees")
+	moduleRepoPath := filepath.Join(workspace, "module1")
+	for _, path := range []string{
+		workspace,
+		moduleRepoPath,
+		filepath.Join(worktreeRoot, "dirty-feature", "module1"),
+		filepath.Join(worktreeRoot, "clean-feature", "module1"),
+	} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fake := &uiFakeGitClient{
+		statusFunc: func(path string) gitproxy.Status {
+			switch {
+			case strings.Contains(path, "dirty-feature"):
+				return gitproxy.Status{Branch: "dirty-feature", IsDirty: true}
+			case strings.Contains(path, "clean-feature"):
+				return gitproxy.Status{Branch: "clean-feature", IsDirty: false}
+			default:
+				return gitproxy.Status{Branch: "main"}
+			}
+		},
+		pushStatuses: map[string]gitproxy.BranchPushStatus{
+			workspace + "|dirty-feature": {
+				Branch: "dirty-feature", RemoteRef: "origin/dirty-feature", IsPushed: false,
+			},
+			moduleRepoPath + "|dirty-feature": {
+				Branch: "dirty-feature", RemoteRef: "origin/dirty-feature", IsPushed: false,
+			},
+			workspace + "|clean-feature": {
+				Branch: "clean-feature", RemoteRef: "origin/clean-feature", IsPushed: true,
+			},
+			moduleRepoPath + "|clean-feature": {
+				Branch: "clean-feature", RemoteRef: "origin/clean-feature", IsPushed: true,
+			},
+		},
+	}
+	eng := engine.NewWithClient(&config.Config{
+		Workspace:    workspace,
+		WorktreeRoot: worktreeRoot,
+		StrictDirty:  true,
+		Modules:      []config.Module{{Name: "module1"}},
+	}, fake)
+	selector := NewWorktreeSelector([]core.WorktreeEnv{
+		{Name: "dirty-feature"},
+		{Name: "clean-feature"},
+	})
+	selector.selected[0] = true
+	selector.selected[1] = true
+
+	return &App{
+		Engine:      eng,
+		state:       "confirm_batch_delete",
+		batchDelete: selector,
+	}, fake, worktreeRoot
+}
+
 // TestApp_View_Loading 状态为 loading 时显示 Loading
 func TestApp_View_Loading(t *testing.T) {
 	app := &App{state: "loading"}
@@ -425,6 +816,27 @@ func TestApp_DeleteFlow_UnpushedConfirmThenDelete(t *testing.T) {
 	}
 	if fake.removeCalls != 2 {
 		t.Fatalf("期望删除模块和主项目，removeCalls=%d", fake.removeCalls)
+	}
+}
+
+func TestApp_ForceDeleteConfirmationSkipsDirtyCheck(t *testing.T) {
+	app, fake := newDeleteRiskTestApp(t)
+	app.deleteForce = true
+	app.Engine.Config.StrictDirty = true
+	fake.dirty = true
+	for key, status := range fake.pushStatuses {
+		status.IsPushed = true
+		status.AheadCount = 0
+		fake.pushStatuses[key] = status
+	}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+
+	if cmd == nil {
+		t.Fatal("强制删除确认后应删除并刷新列表")
+	}
+	if app.state != "loading" || fake.removeCalls != 2 {
+		t.Fatalf("强制删除未完成: state=%q removeCalls=%d err=%v", app.state, fake.removeCalls, app.err)
 	}
 }
 
@@ -595,6 +1007,48 @@ func TestApp_renderMenu_ConfiguredAppOpeners(t *testing.T) {
 	}
 }
 
+func TestApp_ForceDeleteMenuStartsForceConfirmation(t *testing.T) {
+	app := &App{
+		state:    "menu",
+		Envs:     []core.WorktreeEnv{{Name: "dirty-feature"}},
+		selected: 0,
+	}
+
+	var forceDeleteItem *operationMenuItem
+	items := app.operationMenuItems()
+	for i := range items {
+		if items[i].label == "强制删除" {
+			forceDeleteItem = &items[i]
+			break
+		}
+	}
+	if forceDeleteItem == nil {
+		t.Fatal("feature 管理菜单应包含强制删除")
+	}
+	forceDeleteItem.run()
+
+	if app.state != "confirm" || app.feature != "dirty-feature" || !app.deleteForce {
+		t.Fatalf("强制删除确认状态异常: state=%q feature=%q force=%v", app.state, app.feature, app.deleteForce)
+	}
+	if view := app.renderConfirm(); !strings.Contains(view, "跳过脏检查") {
+		t.Fatalf("强制删除确认应提示跳过脏检查: %s", view)
+	}
+}
+
+func TestApp_ForceDeleteMenuShortcut(t *testing.T) {
+	app := &App{
+		state:    "menu",
+		Envs:     []core.WorktreeEnv{{Name: "dirty-feature"}},
+		selected: 0,
+	}
+
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+
+	if app.state != "confirm" || !app.deleteForce {
+		t.Fatalf("按 f 应进入强制删除确认: state=%q force=%v", app.state, app.deleteForce)
+	}
+}
+
 func TestApp_handleMenuKey_ConfiguredAppOpenerShortcutAndEnter(t *testing.T) {
 	calls := withAppOpenerHooks(t, map[string]bool{"Zed": true})
 	app := New(&config.Config{
@@ -743,12 +1197,15 @@ func assertStartedCommand(t *testing.T, calls []uiStartedCommand, index int, nam
 	}
 }
 
-// TestApp_renderList_IncludesCreateShortcut 列表帮助展示创建快捷键
-func TestApp_renderList_IncludesCreateShortcut(t *testing.T) {
+// TestApp_renderList_IncludesCreateAndBatchDeleteShortcuts 列表帮助展示创建和批量删除快捷键。
+func TestApp_renderList_IncludesCreateAndBatchDeleteShortcuts(t *testing.T) {
 	app := &App{state: "list"}
 	view := app.renderList()
 	if !strings.Contains(view, "n 新建 feature") {
 		t.Fatalf("renderList() 应包含创建快捷键，got:\n%s", view)
+	}
+	if !strings.Contains(view, "d 删除  b 批量删除") {
+		t.Fatalf("批量删除快捷键应紧跟单个删除快捷键，got:\n%s", view)
 	}
 }
 
@@ -1082,6 +1539,10 @@ type uiFakeGitClient struct {
 	pushStatuses        map[string]gitproxy.BranchPushStatus
 	createWorktreeCalls []uiFakeCreateWorktreeCall
 	removeCalls         int
+	removeResult        gitproxy.RemoveWorktreeResult
+	removeErr           error
+	dirty               bool
+	statusFunc          func(path string) gitproxy.Status
 }
 
 func (f *uiFakeGitClient) Clone(ctx context.Context, url, path string) error {
@@ -1099,16 +1560,19 @@ func (f *uiFakeGitClient) CreateWorktree(ctx context.Context, repoPath, branch, 
 }
 
 func (f *uiFakeGitClient) GetStatus(ctx context.Context, path string) (gitproxy.Status, error) {
-	return gitproxy.Status{Branch: "feat-a"}, nil
+	if f.statusFunc != nil {
+		return f.statusFunc(path), nil
+	}
+	return gitproxy.Status{Branch: "feat-a", IsDirty: f.dirty}, nil
 }
 
 func (f *uiFakeGitClient) RemoveWorktree(ctx context.Context, path string) error {
 	return nil
 }
 
-func (f *uiFakeGitClient) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktreePath, featureDirName string) error {
+func (f *uiFakeGitClient) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktreePath, featureDirName string) (gitproxy.RemoveWorktreeResult, error) {
 	f.removeCalls++
-	return nil
+	return f.removeResult, f.removeErr
 }
 
 func (f *uiFakeGitClient) ListWorktrees(ctx context.Context, repoPath string) ([]gitproxy.WorktreeInfo, error) {

@@ -41,7 +41,7 @@
 
 #### Scenario: feature 操作菜单显示内置选项
 - **WHEN** 用户选中 feature 并进入操作菜单
-- **THEN** 菜单显示内置选项 "打开 VS Code"、"打开 Codex"、"复制路径"、"更新代码"、"Modules 管理" 和 "删除"
+- **THEN** 菜单显示内置选项 "打开 VS Code"、"打开 Codex"、"复制路径"、"更新代码"、"Modules 管理"、"删除" 和 "强制删除"
 
 #### Scenario: 已安装配置化 app opener 显示在菜单中
 - **WHEN** `.modu.yaml` 配置了 `app: Zed`、`label: Zed`、`shortcut: z` 的 app opener 且当前机器已安装 Zed
@@ -77,6 +77,11 @@
 - **WHEN** 用户在操作菜单选中"删除"项并按 d
 - **THEN** TUI 进入删除确认状态
 
+#### Scenario: 执行强制删除操作
+- **WHEN** 用户在 feature 操作菜单选择"强制删除"或按 `f`
+- **THEN** TUI 进入强制删除确认状态并提示该操作会跳过脏检查
+- **THEN** 用户确认后使用强制模式删除，但仍保留未推送分支二次确认
+
 #### Scenario: 执行打开 VS Code
 - **WHEN** 用户在操作菜单选中"打开 VS Code"项并按 o
 - **THEN** 在 VS Code 中打开主项目，然后返回列表视图
@@ -107,6 +112,39 @@
 #### Scenario: 直接删除
 - **WHEN** 用户在列表视图按 d
 - **THEN** TUI 进入删除确认状态，显示待删除的特征名
+
+### Requirement: 主列表批量删除
+用户 MUST 可以在主 TUI 列表页通过 `b` 进入批量删除，并在执行前完成二次确认。
+
+#### Scenario: 进入批量删除页
+- **WHEN** 用户在主列表页按 `b`
+- **THEN** TUI 展示当前所有 feature worktree，并允许通过空格多选
+- **THEN** 每个 worktree 按主列表相同口径统计配置内模块的 dirty 数量，clean 状态使用成功色，dirty 状态使用错误色
+
+#### Scenario: 普通批量删除需要确认
+- **WHEN** 用户选中一个或多个 worktree 后按 `d`
+- **THEN** TUI 展示全部待删除 feature 并要求用户按 `y` 二次确认
+- **THEN** 用户确认后逐个执行普通删除，脏 worktree 删除失败不阻断其他 worktree
+
+#### Scenario: 强制批量删除需要确认
+- **WHEN** 用户选中一个或多个 worktree 后按 `f`
+- **THEN** TUI 展示全部待删除 feature、跳过脏检查和未推送分支保护的警告，并要求用户按 `y` 二次确认
+- **THEN** 确认页使用成功色显示 `clean`，使用错误色显示 `N dirty`
+- **THEN** 用户确认后逐个执行强制删除，不因未提交修改或未推送分支而阻止删除
+
+#### Scenario: 取消批量删除
+- **WHEN** 用户在选择页按 `q` 或 Esc，或者在确认页按 `n` 或 Esc
+- **THEN** TUI 不删除任何 worktree；从确认页取消时返回选择页并保留选择
+
+#### Scenario: 展示批量删除失败详情
+- **WHEN** 一个或多个选中的 worktree 删除失败
+- **THEN** TUI 按选择顺序逐条展示失败的 worktree 名称和失败原因，而不是仅展示失败数量
+- **THEN** 已知的脏 worktree、未推送分支和不存在错误使用中文原因，未知错误保留底层错误信息
+
+#### Scenario: 安全展示删除警告
+- **WHEN** 删除成功但分支不匹配、detached HEAD 或 Git worktree 清理降级产生非致命警告
+- **THEN** 删除任务通过消息将警告返回 TUI，并按 worktree 逐行展示
+- **THEN** Git 和 Engine 后台删除逻辑不直接写入 stdout，不与 TUI 渲染竞争
 
 ### Requirement: TUI confirms unpushed branch deletion
 The TUI SHALL require an additional confirmation before deleting a feature when the delete operation would remove local branches that are not fully pushed.
@@ -236,6 +274,8 @@ TUI 面向用户的所有提示 SHALL 使用中文。删除与错误相关文案
 | 删除确认标题 | 确认删除 |
 | 删除确认说明 | 确定要删除 feature「%s」吗？ |
 | 删除确认操作提示 | 按 y 确认，n 取消 |
+| 强制删除确认标题 | 确认强制删除 |
+| 强制删除确认说明 | 确定要强制删除 feature「%s」吗？此操作将跳过脏检查。 |
 | 删除成功反馈 | 已删除 feature: &lt;feature&gt; |
 | 错误界面标题 | 错误 |
 | 错误界面继续提示 | 按任意键继续... |

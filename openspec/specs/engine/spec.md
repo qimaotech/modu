@@ -22,8 +22,10 @@
 ## DeleteWorktree
 
 1. 若 feature 目录不存在，返回 `ERR_FEATURE_NOT_FOUND`。
-2. 若未使用 `--force` 且 `Config.StrictDirty` 为 true：构建 `WorktreeEnv` 时仅包含 **配置内模块** 子目录，调用 **CheckDirty**；若有 dirty 模块，返回 `ERR_DIRTY_WORKTREE`。
+2. 若未使用 `--force` 且 `Config.StrictDirty` 为 true：构建包含主项目和 **配置内模块** 子目录的 `WorktreeEnv`，调用 **CheckDirty**；任一项目 dirty 时返回 `ERR_DIRTY_WORKTREE`。
 3. 仅对 **配置内模块** 依次执行 `RemoveWorktreeAndBranch(ctx, repoPath, modulePath, dirName)`，再对主项目执行 `RemoveWorktreeAndBranch(ctx, workspace, mainProjectPath, dirName)`，最后 `os.RemoveAll(featurePath)`。`dirName` 为 `featureToDirName(feature)`，供 gitproxy 校验「当前分支 slug」与目录名一致后再删分支。不对非配置目录单独调用 RemoveWorktreeAndBranch。
+4. 模块、主项目或分支删除失败时继续尝试剩余清理，但最终 MUST 返回包含失败对象和底层原因的 `ERR_PARTIAL_FAILURE`，不得将本次删除统计为成功。
+5. 跳过非候选分支等非致命警告通过删除结果返回，由调用方展示；gitproxy 不直接写终端输出。
 
 ### Requirement: Engine preflights unpushed branch deletion
 The engine SHALL identify all local branches that would be deleted by a feature deletion before removing any worktree.
@@ -50,9 +52,17 @@ The engine SHALL identify all local branches that would be deleted by a feature 
 
 ## CheckDirty
 
-- 输入：`WorktreeEnv`（含各模块 Path）。
-- 对每个模块调用 gitproxy `GetStatus(path)`；若 `Status.IsDirty` 则加入结果列表。
+- 输入：`WorktreeEnv`（含主项目与各模块 Path）。
+- 对主项目和每个模块调用 gitproxy `GetStatus(path)`；若 `Status.IsDirty` 则加入结果列表。
 - 返回：dirty 的 `[]ModuleStatus`。
+
+## DeleteWorktreesWithOptions
+
+- 输入多个 feature，依次复用单个 `DeleteWorktreeWithOptions` 删除流程。
+- 普通模式保留每个 worktree 的脏检查；强制模式为所有选中 worktree 跳过脏检查。
+- 单个 feature 删除失败时记录到失败结果，并继续尝试后续 feature。
+- 每个 feature 的非致命删除警告按 feature 返回给展示层。
+- 普通模式继续执行未推送分支保护；批量强制模式由调用方显式设置 `AllowUnpushedBranches` 后跳过该保护。
 
 ## ListWorktrees
 

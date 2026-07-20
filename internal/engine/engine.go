@@ -48,6 +48,11 @@ type DeleteOptions struct {
 	AllowUnpushedBranches bool
 }
 
+// DeleteWorktreeResult 描述一次删除中需要由调用方展示的非致命警告。
+type DeleteWorktreeResult struct {
+	Warnings []string
+}
+
 // worktreeResult 创建工作树的结果
 type worktreeResult struct {
 	module   config.Module
@@ -259,12 +264,12 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 		// 回滚：删除已创建的模块 worktree
 		for _, r := range resultSlice {
 			if r.err == nil && r.path != "" && r.repoPath != "" {
-				_ = e.GitProxy.RemoveWorktreeAndBranch(ctx, r.repoPath, r.path, dirName)
+				_, _ = e.GitProxy.RemoveWorktreeAndBranch(ctx, r.repoPath, r.path, dirName)
 				_ = os.RemoveAll(r.path)
 			}
 		}
 		// 删除主项目 worktree（feature 目录）
-		_ = e.GitProxy.RemoveWorktreeAndBranch(ctx, e.Config.Workspace, mainProjectPath, dirName)
+		_, _ = e.GitProxy.RemoveWorktreeAndBranch(ctx, e.Config.Workspace, mainProjectPath, dirName)
 		_ = os.RemoveAll(mainProjectPath)
 
 		if len(errMsgs) > 0 {
@@ -429,8 +434,13 @@ func (e *Engine) resolveWorktreeFeature(ctx context.Context, featurePath, dirNam
 // CheckDirty 检查环境是否存在未提交修改
 func (e *Engine) CheckDirty(ctx context.Context, env core.WorktreeEnv) ([]core.ModuleStatus, error) {
 	var dirty []core.ModuleStatus
+	candidates := make([]core.ModuleStatus, 0, len(env.Modules)+1)
+	if env.MainProject != nil {
+		candidates = append(candidates, *env.MainProject)
+	}
+	candidates = append(candidates, env.Modules...)
 
-	for _, module := range env.Modules {
+	for _, module := range candidates {
 		status, err := e.GitProxy.GetStatus(ctx, module.Path)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get status for %s: %w", module.Path, err)
@@ -527,12 +537,14 @@ func branchToFeatureDirName(branch string) string {
 
 // DeleteWorktree 删除 feature 工作树
 func (e *Engine) DeleteWorktree(ctx context.Context, feature string, force bool) error {
-	return e.DeleteWorktreeWithOptions(ctx, feature, force, DeleteOptions{})
+	_, err := e.DeleteWorktreeWithOptions(ctx, feature, force, DeleteOptions{})
+	return err
 }
 
 // DeleteWorktreeWithOptions 删除 feature 工作树，并允许外层传入已确认的危险操作选项。
-func (e *Engine) DeleteWorktreeWithOptions(ctx context.Context, feature string, force bool, options DeleteOptions) error {
+func (e *Engine) DeleteWorktreeWithOptions(ctx context.Context, feature string, force bool, options DeleteOptions) (DeleteWorktreeResult, error) {
 	logger.Info("开始删除 feature: %s, force: %v", feature, force)
+	result := DeleteWorktreeResult{}
 
 	// 将 feature 名转换为目录名（feature/hello → feature-hello）
 	dirName := featureToDirName(feature)
@@ -540,18 +552,22 @@ func (e *Engine) DeleteWorktreeWithOptions(ctx context.Context, feature string, 
 
 	// 检查是否存在
 	if _, err := os.Stat(featurePath); os.IsNotExist(err) {
-		return fmt.Errorf("feature %s not found: %w", feature, errs.ErrFeatureNotFound)
+		return result, fmt.Errorf("feature %s not found: %w", feature, errs.ErrFeatureNotFound)
 	}
 
 	// 脏检查
 	if !force && e.Config.StrictDirty {
 		env := core.WorktreeEnv{
 			Name: feature,
+			MainProject: &core.ModuleStatus{
+				Name: filepath.Base(e.Config.Workspace),
+				Path: featurePath,
+			},
 		}
 		// 遍历 feature 目录下的所有模块
 		entries, err := os.ReadDir(featurePath)
 		if err != nil {
-			return fmt.Errorf("failed to read feature directory: %w", err)
+			return result, fmt.Errorf("failed to read feature directory: %w", err)
 		}
 		configuredNames := e.configuredModuleNames()
 		for _, entry := range entries {
@@ -567,28 +583,29 @@ func (e *Engine) DeleteWorktreeWithOptions(ctx context.Context, feature string, 
 
 		dirty, err := e.CheckDirty(ctx, env)
 		if err != nil {
-			return err
+			return result, err
 		}
 		if len(dirty) > 0 {
-			return fmt.Errorf("cannot delete: uncommitted changes detected in %v: %w", dirty, errs.ErrDirtyWorktree)
+			return result, fmt.Errorf("cannot delete: uncommitted changes detected in %v: %w", dirty, errs.ErrDirtyWorktree)
 		}
 	}
 
 	if !options.AllowUnpushedBranches {
 		risks, err := e.CheckDeleteUnpushedBranches(ctx, feature)
 		if err != nil {
-			return err
+			return result, err
 		}
 		if len(risks) > 0 {
-			return fmt.Errorf("cannot delete: unpushed branches detected: %w", errs.ErrUnpushedBranch)
+			return result, fmt.Errorf("cannot delete: unpushed branches detected: %w", errs.ErrUnpushedBranch)
 		}
 	}
 
 	// 获取 feature 目录下实际存在的模块
 	entries, err := os.ReadDir(featurePath)
 	if err != nil {
-		return fmt.Errorf("failed to read feature directory: %w", err)
+		return result, fmt.Errorf("failed to read feature directory: %w", err)
 	}
+	deleteFailures := make([]string, 0)
 
 	// 删除所有存在的模块的 worktree
 	for _, entry := range entries {
@@ -621,13 +638,19 @@ func (e *Engine) DeleteWorktreeWithOptions(ctx context.Context, feature string, 
 			// 仓库不存在，只删除目录
 			if err := os.RemoveAll(modulePath); err != nil {
 				logger.Error("删除模块目录失败: %s, error=%v", moduleName, err)
+				deleteFailures = append(deleteFailures, fmt.Sprintf("module %s: %v", moduleName, err))
 			}
 			continue
 		}
 
 		logger.Info("删除模块 worktree: module=%s, repo=%s, featureDir=%s, path=%s", moduleName, repoPath, dirName, modulePath)
-		if err := e.GitProxy.RemoveWorktreeAndBranch(ctx, repoPath, modulePath, dirName); err != nil {
+		removeResult, err := e.GitProxy.RemoveWorktreeAndBranch(ctx, repoPath, modulePath, dirName)
+		for _, warning := range removeResult.Warnings {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("module %s: %s", moduleName, warning))
+		}
+		if err != nil {
 			logger.Error("删除模块 worktree 失败: module=%s, error=%v", moduleName, err)
+			deleteFailures = append(deleteFailures, fmt.Sprintf("module %s: %v", moduleName, err))
 			continue
 		}
 		logger.Info("删除模块 worktree 成功: %s", moduleName)
@@ -641,9 +664,13 @@ func (e *Engine) DeleteWorktreeWithOptions(ctx context.Context, feature string, 
 		logger.Warn("主项目仓库不存在，跳过: repo=%s", e.Config.Workspace)
 	} else {
 		logger.Info("删除主项目 worktree: repo=%s, featureDir=%s, path=%s", e.Config.Workspace, dirName, mainProjectPath)
-		if err := e.GitProxy.RemoveWorktreeAndBranch(ctx, e.Config.Workspace, mainProjectPath, dirName); err != nil {
+		removeResult, err := e.GitProxy.RemoveWorktreeAndBranch(ctx, e.Config.Workspace, mainProjectPath, dirName)
+		for _, warning := range removeResult.Warnings {
+			result.Warnings = append(result.Warnings, "main project: "+warning)
+		}
+		if err != nil {
 			logger.Error("删除主项目 worktree 失败: error=%v", err)
-			fmt.Printf("Warning: failed to remove main project worktree: %v\n", err)
+			deleteFailures = append(deleteFailures, fmt.Sprintf("main project: %v", err))
 		} else {
 			logger.Info("删除主项目 worktree 成功")
 		}
@@ -652,11 +679,32 @@ func (e *Engine) DeleteWorktreeWithOptions(ctx context.Context, feature string, 
 	// 删除 feature 目录
 	if err := os.RemoveAll(featurePath); err != nil {
 		logger.Error("删除 feature 目录失败: %s, error: %v", feature, err)
-		return fmt.Errorf("failed to remove feature directory: %w", err)
+		deleteFailures = append(deleteFailures, fmt.Sprintf("feature directory: %v", err))
+	}
+	if len(deleteFailures) > 0 {
+		return result, fmt.Errorf("delete feature %s incomplete: %s: %w", feature, strings.Join(deleteFailures, "; "), errs.ErrPartialFailure)
 	}
 
 	logger.Info("成功删除 feature: %s", feature)
-	return nil
+	return result, nil
+}
+
+// DeleteWorktreesWithOptions 依次删除多个 feature；单个失败不阻断其余删除。
+func (e *Engine) DeleteWorktreesWithOptions(ctx context.Context, features []string, force bool, options DeleteOptions) (succeeded []string, failed map[string]error, warnings map[string][]string) {
+	failed = make(map[string]error)
+	warnings = make(map[string][]string)
+	for _, feature := range features {
+		result, err := e.DeleteWorktreeWithOptions(ctx, feature, force, options)
+		if len(result.Warnings) > 0 {
+			warnings[feature] = result.Warnings
+		}
+		if err != nil {
+			failed[feature] = err
+			continue
+		}
+		succeeded = append(succeeded, feature)
+	}
+	return succeeded, failed, warnings
 }
 
 // GetMainProject 获取主项目（workspace）状态，若路径无效或非 git 仓库则返回 nil 与 nil error
@@ -1182,7 +1230,7 @@ func (e *Engine) RemoveModuleWithOptions(ctx context.Context, feature, moduleNam
 		}
 	}
 
-	if err := e.GitProxy.RemoveWorktreeAndBranch(ctx, repoPath, modulePath, dirName); err != nil {
+	if _, err := e.GitProxy.RemoveWorktreeAndBranch(ctx, repoPath, modulePath, dirName); err != nil {
 		return fmt.Errorf("failed to remove worktree for %s: %w", moduleName, err)
 	}
 

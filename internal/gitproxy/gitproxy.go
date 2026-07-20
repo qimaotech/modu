@@ -14,8 +14,8 @@ type GitClient interface {
 	GetStatus(ctx context.Context, path string) (Status, error)
 	// RemoveWorktree 删除工作树
 	RemoveWorktree(ctx context.Context, path string) error
-	// RemoveWorktreeAndBranch 删除工作树；若 worktree 当前分支经 /→- 规范化后与 featureDirName 一致则再删除该分支，否则跳过删分支（防误删）
-	RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktreePath, featureDirName string) error
+	// RemoveWorktreeAndBranch 删除工作树；若 worktree 当前分支经 /→- 规范化后与 featureDirName 一致则再删除该分支，否则通过结果返回警告并跳过删分支（防误删）
+	RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktreePath, featureDirName string) (RemoveWorktreeResult, error)
 	// ListWorktrees 列出所有工作树
 	ListWorktrees(ctx context.Context, repoPath string) ([]WorktreeInfo, error)
 	// Fetch 从远程获取最新
@@ -36,6 +36,11 @@ type GitClient interface {
 	CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath, branch, worktreePath string) error
 	// GetBranchPushStatus 检查本地分支是否已完整推送到远端分支
 	GetBranchPushStatus(ctx context.Context, repoPath, branch string) (BranchPushStatus, error)
+}
+
+// RemoveWorktreeResult 描述 worktree 删除成功时需要由调用方展示的非致命警告。
+type RemoveWorktreeResult struct {
+	Warnings []string
 }
 
 // Status Git 状态

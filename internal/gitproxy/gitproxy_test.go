@@ -2,11 +2,75 @@ package gitproxy
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
+
+// TestRemoveWorktreeAndBranch_ReturnsWarningWithoutWritingStdout 验证警告由结果返回而不直接破坏 TUI 输出。
+func TestRemoveWorktreeAndBranch_ReturnsWarningWithoutWritingStdout(t *testing.T) {
+	indexFile, hadIndexFile := os.LookupEnv("GIT_INDEX_FILE")
+	if err := os.Unsetenv("GIT_INDEX_FILE"); err != nil {
+		t.Fatalf("清理外层 GIT_INDEX_FILE 失败: %v", err)
+	}
+	t.Cleanup(func() {
+		var err error
+		if hadIndexFile {
+			err = os.Setenv("GIT_INDEX_FILE", indexFile)
+		} else {
+			err = os.Unsetenv("GIT_INDEX_FILE")
+		}
+		if err != nil {
+			t.Errorf("恢复 GIT_INDEX_FILE 失败: %v", err)
+		}
+	})
+
+	tmpDir := t.TempDir()
+	repoPath := filepath.Join(tmpDir, "repo")
+	worktreePath := filepath.Join(tmpDir, "feature-welfare-feeds-cpr")
+	runGit(t, "", "init", repoPath)
+	runGit(t, repoPath, "config", "user.name", "modu test")
+	runGit(t, repoPath, "config", "user.email", "modu@example.com")
+	writeCommit(t, repoPath, "README.md", "initial", "initial")
+	runGit(t, repoPath, "worktree", "add", "-b", "feature/dynamic-coin", worktreePath)
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStdout := os.Stdout
+	os.Stdout = writer
+	removeResult, removeErr := (&GitProxy{}).RemoveWorktreeAndBranch(
+		context.Background(),
+		repoPath,
+		worktreePath,
+		"feature-welfare-feeds-cpr",
+	)
+	closeErr := writer.Close()
+	os.Stdout = originalStdout
+	stdout, readErr := io.ReadAll(reader)
+	_ = reader.Close()
+
+	if removeErr != nil {
+		t.Fatalf("RemoveWorktreeAndBranch() unexpected error: %v", removeErr)
+	}
+	if closeErr != nil || readErr != nil {
+		t.Fatalf("读取 stdout 失败: close=%v read=%v", closeErr, readErr)
+	}
+	if len(stdout) != 0 {
+		t.Fatalf("RemoveWorktreeAndBranch() 不应直接写 stdout，got %q", stdout)
+	}
+	if len(removeResult.Warnings) != 1 || !strings.Contains(removeResult.Warnings[0], "slug does not match") {
+		t.Fatalf("应返回分支不匹配警告，got %+v", removeResult.Warnings)
+	}
+	if !(&GitProxy{}).BranchExists(context.Background(), repoPath, "feature/dynamic-coin") {
+		t.Fatal("分支不匹配时应保留原分支")
+	}
+}
 
 func TestParseStatus(t *testing.T) {
 	tests := []struct {
@@ -254,8 +318,11 @@ func TestRemoteBranchExists_RepoNotExists(t *testing.T) {
 
 func TestRemoteBranchExists_NetworkError(t *testing.T) {
 	g := &GitProxy{}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
 	// 使用无效的网络地址
-	exists := g.RemoteBranchExists(context.Background(), "git@192.0.2.1:nonexistent/repo.git", "main")
+	exists := g.RemoteBranchExists(ctx, "git@192.0.2.1:nonexistent/repo.git", "main")
 	if exists {
 		t.Error("expected false for network error")
 	}
@@ -344,6 +411,7 @@ func runGit(t *testing.T, repoPath string, args ...string) {
 	t.Helper()
 
 	cmd := exec.Command("git", args...)
+	cmd.Env = gitTestEnvironment()
 	if repoPath != "" {
 		cmd.Dir = repoPath
 	}
@@ -351,4 +419,25 @@ func runGit(t *testing.T, repoPath string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %v failed: %v, output: %s", args, err, string(out))
 	}
+}
+
+// gitTestEnvironment 移除提交钩子注入的仓库环境，避免临时仓库和 linked worktree 误用外层索引。
+func gitTestEnvironment() []string {
+	repositoryVariables := map[string]struct{}{
+		"GIT_COMMON_DIR":       {},
+		"GIT_DIR":              {},
+		"GIT_INDEX_FILE":       {},
+		"GIT_OBJECT_DIRECTORY": {},
+		"GIT_PREFIX":           {},
+		"GIT_WORK_TREE":        {},
+	}
+	environment := make([]string, 0, len(os.Environ()))
+	for _, item := range os.Environ() {
+		name, _, _ := strings.Cut(item, "=")
+		if _, blocked := repositoryVariables[name]; blocked {
+			continue
+		}
+		environment = append(environment, item)
+	}
+	return environment
 }

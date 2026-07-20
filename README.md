@@ -7,7 +7,7 @@
 | 命令            | 说明                                       |
 | --------------- | ------------------------------------------ |
 | `create`        | 创建 feature 工作树                        |
-| `delete`        | 删除 feature 工作树                        |
+| `delete`        | 删除单个 feature 工作树                    |
 | `default-select` | 设置创建 feature 时默认选中的模块          |
 | `list`          | 列出所有 feature 工作树                    |
 | `info`          | 查看 feature 详情                          |
@@ -180,6 +180,8 @@ modu version
 | n      | 新建 feature                    |
 | c      | 复制路径到剪贴板                 |
 | d      | 删除选中 feature                 |
+| b      | 批量选择并删除 feature           |
+| f      | 在 feature 操作菜单中强制删除（跳过脏检查） |
 | m      | 管理模块（仅 feature 有效）      |
 | o      | 用 VS Code 打开主项目           |
 | x      | 用 Codex 打开主项目             |
@@ -188,6 +190,8 @@ modu version
 | q/esc  | 退出 TUI                       |
 
 配置化 App opener 只在对应 App 已安装时显示；快捷键冲突时可通过操作菜单选中后按 Enter 执行。
+
+在主 TUI 列表页按 `b` 进入批量删除页；用空格多选，`d` 普通删除、`f` 强制删除。两种模式都会先展示待删除列表并要求按 `y` 二次确认；批量页与主列表使用相同的模块 dirty 统计口径，并以绿色 `clean`、红色 `N dirty` 标出状态。强制删除会跳过脏检查与未推送分支保护，普通模式会保留有未提交修改的 worktree。删除失败时，结果区会逐条展示失败的 worktree 及具体原因；非致命的分支清理警告由 TUI 逐行展示，不会从后台任务直接写入终端。
 
 ```bash
 # 创建配置文件

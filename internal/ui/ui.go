@@ -16,6 +16,7 @@ import (
 	"github.com/qimaotech/modu/internal/config"
 	"github.com/qimaotech/modu/internal/core"
 	"github.com/qimaotech/modu/internal/engine"
+	errs "github.com/qimaotech/modu/internal/errors"
 )
 
 // 全局样式
@@ -125,13 +126,26 @@ type FeatureEntry struct {
 func (e *FeatureEntry) IsMainProject() bool { return false }
 func (e *FeatureEntry) GetName() string     { return e.WorktreeEnv.Name }
 func (e *FeatureEntry) GetDirtyCount() int {
-	n := 0
-	for _, m := range e.WorktreeEnv.Modules {
-		if m.IsDirty {
-			n++
+	return worktreeDirtyCount(*e.WorktreeEnv)
+}
+
+// worktreeDirtyCount 按主列表口径统计 feature 下的脏模块数量。
+func worktreeDirtyCount(worktree core.WorktreeEnv) int {
+	dirtyCount := 0
+	for _, module := range worktree.Modules {
+		if module.IsDirty {
+			dirtyCount++
 		}
 	}
-	return n
+	return dirtyCount
+}
+
+// renderDirtyStatus 将脏模块数量渲染为主列表和批量页共用的彩色状态。
+func renderDirtyStatus(dirtyCount int) string {
+	if dirtyCount > 0 {
+		return errorStyle.Render(fmt.Sprintf("%d dirty", dirtyCount))
+	}
+	return successStyle.Render("clean")
 }
 
 // TUI App 状态
@@ -143,9 +157,13 @@ type App struct {
 	menuSelected     int    // 操作菜单选中项
 	state            string // "loading", "list", "menu", "modules", "confirm", "confirm_unpushed", "error"
 	feature          string
+	deleteForce      bool
 	err              error
 	message          string
+	messageIsError   bool
 	unpushedBranches []engine.UnpushedBranch
+	batchDelete      *WorktreeSelector
+	batchDeleteForce bool
 	// 配置化 App 打开工具
 	availableAppOpeners []config.AppOpener
 	appOpenersResolved  bool
@@ -205,6 +223,55 @@ type createFeatureDoneMsg struct {
 	err     error
 }
 
+// batchDeleteDoneMsg 保存批量删除结果以及原始选择顺序。
+type batchDeleteDoneMsg struct {
+	features  []string
+	succeeded []string
+	failed    map[string]error
+	warnings  map[string][]string
+}
+
+// formatBatchDeleteFailureReason 将常见删除错误转换为适合 TUI 展示的中文原因。
+func formatBatchDeleteFailureReason(err error) string {
+	switch {
+	case err == nil:
+		return "未知错误"
+	case errors.Is(err, errs.ErrDirtyWorktree):
+		return "存在未提交修改"
+	case errors.Is(err, errs.ErrUnpushedBranch):
+		return "存在未推送到远端的本地分支"
+	case errors.Is(err, errs.ErrFeatureNotFound):
+		return "worktree 不存在"
+	default:
+		return err.Error()
+	}
+}
+
+// formatBatchDeleteResult 按用户选择顺序展示失败的 worktree 和具体原因。
+func formatBatchDeleteResult(msg batchDeleteDoneMsg) string {
+	var result strings.Builder
+	fmt.Fprintf(&result, "批量删除完成，成功 %d 个", len(msg.succeeded))
+	if len(msg.failed) > 0 {
+		result.WriteString("\n删除失败：")
+		for _, feature := range msg.features {
+			deleteErr, failed := msg.failed[feature]
+			if !failed {
+				continue
+			}
+			fmt.Fprintf(&result, "\n- %s：%s", feature, formatBatchDeleteFailureReason(deleteErr))
+		}
+	}
+	if len(msg.warnings) > 0 {
+		result.WriteString("\n警告：")
+		for _, feature := range msg.features {
+			for _, warning := range msg.warnings[feature] {
+				fmt.Fprintf(&result, "\n- %s：%s", feature, warning)
+			}
+		}
+	}
+	return result.String()
+}
+
 type errorMsg struct {
 	err error
 }
@@ -246,6 +313,13 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resetCreateFeature()
 		m.state = "loading"
 		return m, m.loadEnvs
+	case batchDeleteDoneMsg:
+		m.message = formatBatchDeleteResult(msg)
+		m.messageIsError = len(msg.failed) > 0
+		m.batchDelete = nil
+		m.batchDeleteForce = false
+		m.state = "loading"
+		return m, m.loadEnvs
 	case errorMsg:
 		m.err = msg.err
 		m.state = "error"
@@ -265,10 +339,60 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleConfirmKey(msg)
 		case "confirm_unpushed":
 			return m.handleUnpushedConfirmKey(msg)
+		case "batch_delete":
+			return m.handleBatchDeleteKey(msg)
+		case "confirm_batch_delete":
+			return m.handleBatchDeleteConfirmKey(msg)
 		case "error":
 			m.state = "list"
 			m.err = nil
 		}
+	}
+	return m, nil
+}
+
+func (m *App) handleBatchDeleteConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "n", "esc":
+		m.state = "batch_delete"
+	case "y", "enter":
+		if m.batchDelete == nil {
+			m.state = "list"
+			return m, nil
+		}
+		features := append([]string(nil), m.batchDelete.SelectedFeatures()...)
+		force := m.batchDeleteForce
+		m.state = "loading"
+		return m, m.executeBatchDelete(features, force)
+	}
+	return m, nil
+}
+
+// executeBatchDelete 执行批量删除；强制模式跳过脏检查和未推送分支保护。
+func (m *App) executeBatchDelete(features []string, force bool) tea.Cmd {
+	return func() tea.Msg {
+		succeeded, failed, warnings := m.Engine.DeleteWorktreesWithOptions(context.Background(), features, force, engine.DeleteOptions{
+			AllowUnpushedBranches: force,
+		})
+		return batchDeleteDoneMsg{features: features, succeeded: succeeded, failed: failed, warnings: warnings}
+	}
+}
+
+func (m *App) handleBatchDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.batchDelete == nil {
+		m.state = "list"
+		return m, nil
+	}
+
+	_, _ = m.batchDelete.Update(msg)
+	if m.batchDelete.Quitting() {
+		m.batchDelete = nil
+		m.state = "list"
+		return m, nil
+	}
+	if (msg.String() == "d" || msg.String() == "f") && len(m.batchDelete.SelectedFeatures()) > 0 {
+		m.batchDeleteForce = m.batchDelete.Force()
+		m.state = "confirm_batch_delete"
 	}
 	return m, nil
 }
@@ -295,6 +419,12 @@ func (m *App) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if entry != nil && !entry.IsMainProject() {
 			m.state = "confirm"
 			m.feature = entry.GetName()
+			m.deleteForce = false
+		}
+	case "b":
+		if len(m.Envs) > 0 {
+			m.batchDelete = NewWorktreeSelector(m.Envs)
+			m.state = "batch_delete"
 		}
 	case "o":
 		if entry := m.selectedListEntry(); entry != nil {
@@ -496,6 +626,15 @@ func (m *App) operationMenuItems() []operationMenuItem {
 			if env := m.selectedFeatureEnv(); env != nil {
 				m.state = "confirm"
 				m.feature = env.Name
+				m.deleteForce = false
+			}
+			return nil
+		}},
+		operationMenuItem{label: "强制删除", shortcut: "f", run: func() tea.Cmd {
+			if env := m.selectedFeatureEnv(); env != nil {
+				m.state = "confirm"
+				m.feature = env.Name
+				m.deleteForce = true
 			}
 			return nil
 		}},
@@ -537,6 +676,7 @@ func builtinMenuShortcuts() map[string]bool {
 		"u": true,
 		"m": true,
 		"d": true,
+		"f": true,
 		"q": true,
 	}
 }
@@ -595,6 +735,7 @@ func (m *App) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.deleteFeature(false)
 	case "n", "esc":
 		m.state = "list"
+		m.deleteForce = false
 	}
 	return m, nil
 }
@@ -606,6 +747,7 @@ func (m *App) handleUnpushedConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.deleteFeature(true)
 	case "n", "esc":
 		m.unpushedBranches = nil
+		m.deleteForce = false
 		m.state = "list"
 	}
 	return m, nil
@@ -613,7 +755,7 @@ func (m *App) handleUnpushedConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // deleteFeature 执行 feature 删除并刷新列表。
 func (m *App) deleteFeature(allowUnpushedBranches bool) (tea.Model, tea.Cmd) {
-	err := m.Engine.DeleteWorktreeWithOptions(context.Background(), m.feature, false, engine.DeleteOptions{
+	deleteResult, err := m.Engine.DeleteWorktreeWithOptions(context.Background(), m.feature, m.deleteForce, engine.DeleteOptions{
 		AllowUnpushedBranches: allowUnpushedBranches,
 	})
 	if err != nil {
@@ -622,7 +764,14 @@ func (m *App) deleteFeature(allowUnpushedBranches bool) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.message = "已删除 feature: " + m.feature
+	if len(deleteResult.Warnings) > 0 {
+		m.message += "\n警告："
+		for _, warning := range deleteResult.Warnings {
+			m.message += "\n- " + warning
+		}
+	}
 	m.unpushedBranches = nil
+	m.deleteForce = false
 	m.state = "loading"
 	m.selected = 0
 	return m, m.loadEnvs
@@ -954,6 +1103,13 @@ func (m *App) View() string {
 		return m.renderConfirm()
 	case "confirm_unpushed":
 		return m.renderUnpushedConfirm()
+	case "batch_delete":
+		if m.batchDelete != nil {
+			return m.batchDelete.View()
+		}
+		return ""
+	case "confirm_batch_delete":
+		return m.renderBatchDeleteConfirm()
 	case "error":
 		return m.renderError()
 	default:
@@ -990,7 +1146,7 @@ func (m *App) renderList() string {
 	var s strings.Builder
 	s.WriteString(headerStyle.Render("modu - Worktree Manager"))
 	s.WriteString("\n\n")
-	s.WriteString(itemStyle.Render("↑/↓ 选择  Enter 回车  n 新建 feature  m 管理模块  u 更新代码  c 复制路径\nd 删除  o 打开 VS Code  x 打开 Codex  q/esc 退出"))
+	s.WriteString(itemStyle.Render("↑/↓ 选择  Enter 回车  n 新建 feature  m 管理模块  u 更新代码  c 复制路径\nd 删除  b 批量删除  o 打开 VS Code  x 打开 Codex  q/esc 退出"))
 	s.WriteString("\n\n")
 
 	total := m.listEntryCount()
@@ -1016,16 +1172,7 @@ func (m *App) renderList() string {
 	}
 	for i := range m.Envs {
 		env := &m.Envs[i]
-		dirtyCount := 0
-		for _, mod := range env.Modules {
-			if mod.IsDirty {
-				dirtyCount++
-			}
-		}
-		status := successStyle.Render("clean")
-		if dirtyCount > 0 {
-			status = errorStyle.Render(fmt.Sprintf("%d dirty", dirtyCount))
-		}
+		status := renderDirtyStatus(worktreeDirtyCount(*env))
 		prefix := "  "
 		if m.selected == row {
 			prefix = "→ "
@@ -1042,8 +1189,13 @@ func (m *App) renderList() string {
 
 	if m.message != "" {
 		s.WriteString("\n")
-		s.WriteString(successStyle.Render(m.message))
+		messageStyle := successStyle
+		if m.messageIsError {
+			messageStyle = errorStyle
+		}
+		s.WriteString(messageStyle.Render(m.message))
 		m.message = ""
+		m.messageIsError = false
 	}
 
 	return s.String()
@@ -1051,11 +1203,46 @@ func (m *App) renderList() string {
 
 func (m *App) renderConfirm() string {
 	var s strings.Builder
-	s.WriteString(headerStyle.Render("确认删除"))
+	title := "确认删除"
+	if m.deleteForce {
+		title = "确认强制删除"
+	}
+	s.WriteString(headerStyle.Render(title))
 	s.WriteString("\n\n")
-	s.WriteString(fmt.Sprintf("确定要删除 feature「%s」吗？\n", m.feature))
+	if m.deleteForce {
+		fmt.Fprintf(&s, "确定要强制删除 feature「%s」吗？此操作将跳过脏检查。\n", m.feature)
+	} else {
+		fmt.Fprintf(&s, "确定要删除 feature「%s」吗？\n", m.feature)
+	}
 	s.WriteString(itemStyle.Render("按 y 确认，n 取消"))
 	s.WriteString("\n\n")
+	return s.String()
+}
+
+// renderBatchDeleteConfirm 渲染批量删除的二次确认页面。
+func (m *App) renderBatchDeleteConfirm() string {
+	var s strings.Builder
+	title := "确认批量删除"
+	if m.batchDeleteForce {
+		title = "确认批量强制删除"
+	}
+	s.WriteString(headerStyle.Render(title))
+	s.WriteString("\n\n")
+	if m.batchDelete != nil {
+		for _, worktree := range m.batchDelete.SelectedWorktrees() {
+			if m.batchDeleteForce {
+				fmt.Fprintf(&s, "- %s (%s)\n", worktree.Name, renderWorktreeStatus(worktree))
+				continue
+			}
+			fmt.Fprintf(&s, "- %s\n", worktree.Name)
+		}
+	}
+	if m.batchDeleteForce {
+		s.WriteString("\n此操作将跳过脏检查和未推送分支保护。\n")
+	}
+	s.WriteString("\n")
+	s.WriteString(itemStyle.Render("按 y 确认，n 取消"))
+	s.WriteString("\n")
 	return s.String()
 }
 
@@ -1264,6 +1451,116 @@ func SelectModules(modules []config.Module, existingModules []string, remoteHasB
 	// 类型断言一定会成功，因为 Program 已经成功返回
 	selector, _ := result.(*ModuleSelector)
 	return selector.SelectedModules(), selector.quitting, nil
+}
+
+// WorktreeSelector 让用户多选待删除的 worktree，并选择普通删除或强制删除。
+type WorktreeSelector struct {
+	worktrees []core.WorktreeEnv
+	selected  []bool
+	cursor    int
+	force     bool
+	quitting  bool
+}
+
+// NewWorktreeSelector 创建待删除 worktree 多选器。
+func NewWorktreeSelector(worktrees []core.WorktreeEnv) *WorktreeSelector {
+	return &WorktreeSelector{
+		worktrees: worktrees,
+		selected:  make([]bool, len(worktrees)),
+	}
+}
+
+// Init 实现 tea.Model，并且无需初始化命令。
+func (m *WorktreeSelector) Init() tea.Cmd {
+	return nil
+}
+
+// Update 处理批量选择、取消以及普通或强制删除键。
+func (m *WorktreeSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	key, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+
+	switch key.String() {
+	case "ctrl+c", "q", "esc":
+		m.quitting = true
+		return m, tea.Quit
+	case "up", "k":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+	case "down", "j":
+		if m.cursor < len(m.worktrees)-1 {
+			m.cursor++
+		}
+	case " ":
+		if m.cursor >= 0 && m.cursor < len(m.selected) {
+			m.selected[m.cursor] = !m.selected[m.cursor]
+		}
+	case "d", "f":
+		if len(m.SelectedFeatures()) == 0 {
+			return m, nil
+		}
+		m.force = key.String() == "f"
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+// View 渲染带颜色状态的 worktree 多选列表。
+func (m *WorktreeSelector) View() string {
+	var s strings.Builder
+	s.WriteString("选择要删除的 worktree（空格多选）:\n\n")
+	for i, worktree := range m.worktrees {
+		cursor := " "
+		if m.cursor == i {
+			cursor = ">"
+		}
+		checkbox := "[ ]"
+		if m.selected[i] {
+			checkbox = "[x]"
+		}
+		fmt.Fprintf(&s, "%s %s %s (%s)\n", cursor, checkbox, worktree.Name, renderWorktreeStatus(worktree))
+	}
+	s.WriteString("\n按 q 退出，空格切换选择，d 普通删除，f 强制删除\n")
+	return s.String()
+}
+
+// renderWorktreeStatus 按主列表口径返回带颜色的 worktree 干净或脏状态。
+func renderWorktreeStatus(worktree core.WorktreeEnv) string {
+	return renderDirtyStatus(worktreeDirtyCount(worktree))
+}
+
+// SelectedWorktrees 返回当前选中的完整 worktree 状态。
+func (m *WorktreeSelector) SelectedWorktrees() []core.WorktreeEnv {
+	worktrees := make([]core.WorktreeEnv, 0, len(m.worktrees))
+	for i, worktree := range m.worktrees {
+		if m.selected[i] {
+			worktrees = append(worktrees, worktree)
+		}
+	}
+	return worktrees
+}
+
+// SelectedFeatures 返回当前选中的 feature 名称。
+func (m *WorktreeSelector) SelectedFeatures() []string {
+	worktrees := m.SelectedWorktrees()
+	features := make([]string, 0, len(worktrees))
+	for _, worktree := range worktrees {
+		features = append(features, worktree.Name)
+	}
+	return features
+}
+
+// Force 返回用户是否选择了强制删除模式。
+func (m *WorktreeSelector) Force() bool {
+	return m.force
+}
+
+// Quitting 返回用户是否取消了批量删除。
+func (m *WorktreeSelector) Quitting() bool {
+	return m.quitting
 }
 
 // ModuleSelector 模块选择器
