@@ -28,3 +28,17 @@
 - 简洁响应，不改未请求代码
 - scope 外先确认，用 auto memory 记录经验
 - DRY / KISS / YAGNI
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are tracked in GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use the single-context domain documentation layout. See `docs/agents/domain.md`.
