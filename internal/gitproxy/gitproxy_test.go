@@ -2,10 +2,13 @@ package gitproxy
 
 import (
 	"context"
+	stderrors "errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	moduerrors "github.com/qimaotech/modu/internal/errors"
 )
 
 func TestParseStatus(t *testing.T) {
@@ -261,6 +264,79 @@ func TestRemoteBranchExists_NetworkError(t *testing.T) {
 	}
 }
 
+// TestFetch_CanceledContextPreservesCause 验证 fetch 错误同时保留业务错误码和上下文原因。
+func TestFetch_CanceledContextPreservesCause(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	g := &GitProxy{}
+	err := g.Fetch(ctx, t.TempDir())
+	if err == nil {
+		t.Fatal("Fetch() error = nil, want canceled error")
+	}
+	if !stderrors.Is(err, moduerrors.ErrGitExec) {
+		t.Fatalf("Fetch() error = %v, want ErrGitExec", err)
+	}
+	if !stderrors.Is(err, context.Canceled) {
+		t.Fatalf("Fetch() error = %v, want context.Canceled", err)
+	}
+}
+
+// TestCreateWorktreeFromRemoteBranch_FetchesRestrictedRefspec 验证受限 refspec 下仍能拉取目标分支并创建 tracking worktree。
+func TestCreateWorktreeFromRemoteBranch_FetchesRestrictedRefspec(t *testing.T) {
+	unsetRepositoryGitEnvironment(t)
+	remotePath, repoPath := setupRestrictedRefspecRepo(t)
+	worktreePath := filepath.Join(filepath.Dir(repoPath), "feature-worktree")
+
+	verifyCmd := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", "refs/remotes/origin/feature/test")
+	if err := verifyCmd.Run(); err == nil {
+		t.Fatal("restricted clone unexpectedly contains origin/feature/test")
+	}
+
+	g := &GitProxy{}
+	if err := g.CreateWorktreeFromRemoteBranch(context.Background(), repoPath, "feature/test", worktreePath); err != nil {
+		t.Fatalf("CreateWorktreeFromRemoteBranch() error = %v, remote = %s", err, remotePath)
+	}
+
+	branchOut, err := exec.Command("git", "-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read worktree branch: %v, output: %s", err, string(branchOut))
+	}
+	if got := string(branchOut); got != "feature/test\n" {
+		t.Fatalf("worktree branch = %q, want %q", got, "feature/test\n")
+	}
+
+	upstreamOut, err := exec.Command("git", "-C", worktreePath, "rev-parse", "--abbrev-ref", "@{upstream}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read worktree upstream: %v, output: %s", err, string(upstreamOut))
+	}
+	if got := string(upstreamOut); got != "origin/feature/test\n" {
+		t.Fatalf("worktree upstream = %q, want %q", got, "origin/feature/test\n")
+	}
+	if err := g.Fetch(context.Background(), repoPath); err != nil {
+		t.Fatalf("Fetch() after adding branch refspec error = %v", err)
+	}
+}
+
+// unsetRepositoryGitEnvironment 隔离 pre-commit 注入的仓库级 Git 环境变量。
+func unsetRepositoryGitEnvironment(t *testing.T) {
+	t.Helper()
+
+	for _, key := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"} {
+		value, exists := os.LookupEnv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
+		if exists {
+			t.Cleanup(func() {
+				if err := os.Setenv(key, value); err != nil {
+					t.Errorf("restore %s: %v", key, err)
+				}
+			})
+		}
+	}
+}
+
 func TestGetBranchPushStatus_Pushed(t *testing.T) {
 	repoPath := setupPushStatusRepo(t, "feature/test")
 
@@ -328,6 +404,31 @@ func setupPushStatusRepo(t *testing.T, branch string) string {
 	runGit(t, repoPath, "push", "-u", "origin", branch)
 
 	return repoPath
+}
+
+// setupRestrictedRefspecRepo 创建仅默认拉取 main 分支的本地 clone。
+func setupRestrictedRefspecRepo(t *testing.T) (string, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	remotePath := filepath.Join(tmpDir, "remote.git")
+	seedPath := filepath.Join(tmpDir, "seed")
+	repoPath := filepath.Join(tmpDir, "repo")
+
+	runGit(t, "", "init", "--bare", remotePath)
+	runGit(t, "", "init", seedPath)
+	runGit(t, seedPath, "config", "user.name", "modu test")
+	runGit(t, seedPath, "config", "user.email", "modu@example.com")
+	runGit(t, seedPath, "checkout", "-b", "main")
+	writeCommit(t, seedPath, "README.md", "main", "initial main")
+	runGit(t, seedPath, "remote", "add", "origin", remotePath)
+	runGit(t, seedPath, "push", "-u", "origin", "main")
+	runGit(t, seedPath, "checkout", "-b", "feature/test")
+	writeCommit(t, seedPath, "feature.txt", "feature", "add feature")
+	runGit(t, seedPath, "push", "-u", "origin", "feature/test")
+	runGit(t, "", "clone", "--single-branch", "--branch", "main", remotePath, repoPath)
+
+	return remotePath, repoPath
 }
 
 func writeCommit(t *testing.T, repoPath, fileName, content, message string) {

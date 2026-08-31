@@ -16,7 +16,7 @@
 ## CreateWorktree（事务性并发创建）
 
 1. **Pre-check**：若 `worktree-root/<feature>` 已存在，可支持“继续添加模块”或报错（由 CLI 层选择）；主项目 worktree 位于 feature 目录根，子模块位于 `feature/<module.Name>`。
-2. **Execution**：主项目先创建 worktree，再 errgroup 并发为各模块执行 `git fetch` + `git worktree add`；已存在的模块目录跳过。
+2. **Execution**：主项目先创建 worktree，再 errgroup 并发为各模块执行 `git fetch` + `git worktree add`；已存在的模块目录跳过。单个模块失败时继续等待同批模块完成，不用首个失败取消它们的 Git 命令。
 3. **Rollback**：若任一模块失败，收集已成功创建的路径，依次 `RemoveWorktreeAndBranch(ctx, repoPath, path, dirName)` + `os.RemoveAll`，再删除主项目 worktree 与 feature 目录；其中 `dirName` 为 `featureToDirName(feature)`，返回 `ERR_PARTIAL_FAILURE` 或等价错误。
 
 ## DeleteWorktree

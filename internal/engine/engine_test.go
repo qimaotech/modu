@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/qimaotech/modu/internal/config"
 	"github.com/qimaotech/modu/internal/core"
@@ -191,6 +192,63 @@ func TestCreateWorktree_RollbackOnFailure(t *testing.T) {
 	// 由于是并发，可能 module1 或 module3 被成功创建然后回滚
 	t.Logf("Removed paths: %v", removedPaths)
 	t.Logf("Error: %v", err)
+}
+
+// TestCreateWorktree_ModuleFailureDoesNotCancelPeers 验证单模块失败不会把同批其他模块误报为 context canceled。
+func TestCreateWorktree_ModuleFailureDoesNotCancelPeers(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Workspace:    filepath.Join(tmpDir, "workspace"),
+		WorktreeRoot: filepath.Join(tmpDir, "worktrees"),
+		Concurrency:  2,
+		Modules: []config.Module{
+			{Name: "module1", URL: "module1"},
+			{Name: "module2", URL: "module2"},
+		},
+	}
+
+	module2Started := make(chan struct{})
+	module1Failed := make(chan struct{})
+	module2Canceled := make(chan struct{}, 1)
+	mock := &MockGitClient{
+		BranchExistsFunc: func(ctx context.Context, repoPath, branch string) bool {
+			return false
+		},
+		CreateWorktreeFunc: func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error {
+			switch filepath.Base(worktreePath) {
+			case "module1":
+				<-module2Started
+				close(module1Failed)
+				return errors.New("module1 failed")
+			case "module2":
+				close(module2Started)
+				<-module1Failed
+				select {
+				case <-ctx.Done():
+					module2Canceled <- struct{}{}
+					return ctx.Err()
+				case <-time.After(50 * time.Millisecond):
+					return nil
+				}
+			default:
+				return nil
+			}
+		},
+	}
+
+	engine := NewWithClient(cfg, mock)
+	err := engine.CreateWorktree(context.Background(), "feature/test", "main")
+	if !errors.Is(err, errs.ErrPartialFailure) {
+		t.Fatalf("CreateWorktree() error = %v, want ErrPartialFailure", err)
+	}
+	if strings.Contains(err.Error(), "module2") {
+		t.Fatalf("CreateWorktree() error includes canceled peer: %v", err)
+	}
+	select {
+	case <-module2Canceled:
+		t.Fatal("module2 context was canceled by module1 failure")
+	default:
+	}
 }
 
 func TestCheckDirty(t *testing.T) {

@@ -174,7 +174,7 @@ func (g *GitProxy) Fetch(ctx context.Context, repoPath string) error {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "fetch", "--all")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("[git fetch] failed to fetch in %s: %w, output: %s", repoPath, errors.ErrGitExec, string(out))
+		return fmt.Errorf("[git fetch] failed to fetch in %s: %w: %w, output: %s", repoPath, errors.ErrGitExec, commandCause(ctx, err), string(out))
 	}
 	return nil
 }
@@ -255,19 +255,56 @@ func (g *GitProxy) RemoteBranchExists(ctx context.Context, repoURL, branch strin
 	return len(strings.TrimSpace(string(out))) > 0
 }
 
-// CreateWorktreeFromRemoteBranch 从远程分支创建 worktree（不创建新分支）
+// CreateWorktreeFromRemoteBranch 从 origin 远程分支创建带跟踪关系的本地 worktree 分支。
 func (g *GitProxy) CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
-	// 先 fetch 确保远程分支信息最新
-	if err := g.Fetch(ctx, repoPath); err != nil {
+	// 显式拉取目标分支，兼容 single-branch clone 或受限的 remote fetch refspec。
+	remoteBranch := "origin/" + branch
+	remoteRef := "refs/remotes/" + remoteBranch
+	refspec := "refs/heads/" + branch + ":" + remoteRef
+	if err := g.ensureOriginTracksBranch(ctx, repoPath, branch, refspec); err != nil {
 		return err
 	}
-	// 直接从远程分支创建 worktree，不创建新分支
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "add", worktreePath, "origin/"+branch)
+	fetchCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "fetch", "origin", refspec)
+	fetchOut, err := fetchCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("[git fetch] failed to fetch remote branch %s in %s: %w: %w, output: %s", branch, repoPath, errors.ErrGitExec, commandCause(ctx, err), string(fetchOut))
+	}
+
+	// worktree 需要本地分支，否则会处于 detached HEAD，无法正常执行后续 update。
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "add", "--track", "-b", branch, worktreePath, remoteBranch)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("[git worktree add] failed to create worktree from remote branch %s at %s: %w, output: %s", branch, worktreePath, errors.ErrGitExec, string(out))
+		return fmt.Errorf("[git worktree add] failed to create worktree from remote branch %s at %s: %w: %w, output: %s", branch, worktreePath, errors.ErrGitExec, commandCause(ctx, err), string(out))
 	}
 	return nil
+}
+
+// ensureOriginTracksBranch 确保 origin 的 fetch refspec 能将目标分支识别为可跟踪的远程分支。
+func (g *GitProxy) ensureOriginTracksBranch(ctx context.Context, repoPath, branch, refspec string) error {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "remote", "set-branches", "--add", "origin", branch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("[git remote set-branches] failed to track remote branch %s in %s: %w: %w, output: %s", branch, repoPath, errors.ErrGitExec, commandCause(ctx, err), string(out))
+	}
+
+	// set-branches 由 Git 维护 remote.origin.fetch；refspec 仅用于校验命令结果是目标映射。
+	verifyCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "config", "--get-all", "--fixed-value", "remote.origin.fetch", "+"+refspec)
+	verifyOut, err := verifyCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("[git config] failed to verify remote branch %s in %s: %w: %w, output: %s", branch, repoPath, errors.ErrGitExec, commandCause(ctx, err), string(verifyOut))
+	}
+	if strings.TrimSpace(string(verifyOut)) == "" {
+		return fmt.Errorf("[git config] target refspec not found for remote branch %s in %s: %w", branch, repoPath, errors.ErrGitExec)
+	}
+	return nil
+}
+
+// commandCause 在命令被上下文中断时优先返回可判断的 context 错误。
+func commandCause(ctx context.Context, commandErr error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("git command context: %w", ctxErr)
+	}
+	return commandErr
 }
 
 // GetBranchPushStatus 检查本地分支是否已完整推送到远端分支。

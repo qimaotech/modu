@@ -160,8 +160,8 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 		}
 	}
 
-	// 4. 并发创建其他模块的 worktree
-	g, ctx := errgroup.WithContext(ctx)
+	// 4. 并发创建其他模块的 worktree。不因单模块失败取消其他模块，以保留真实错误结果。
+	var g errgroup.Group
 	g.SetLimit(e.Config.Concurrency)
 
 	results := make(chan worktreeResult, len(e.Config.Modules))
