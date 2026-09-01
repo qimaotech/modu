@@ -32,7 +32,7 @@ type GitClient interface {
 	CreateWorktreeFromExistingBranch(ctx context.Context, repoPath, branch, worktreePath string) error
 	// RemoteBranchExists 检查远端仓库是否存在指定分支
 	RemoteBranchExists(ctx context.Context, repoURL, branch string) bool
-	// CreateWorktreeFromRemoteBranch 从远程分支创建 worktree（不创建新分支）
+	// CreateWorktreeFromRemoteBranch 从 origin 远程分支创建带跟踪关系的本地 worktree 分支
 	CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath, branch, worktreePath string) error
 	// GetBranchPushStatus 检查本地分支是否已完整推送到远端分支
 	GetBranchPushStatus(ctx context.Context, repoPath, branch string) (BranchPushStatus, error)
