@@ -21,10 +21,8 @@ builds:
     # 使用默认 ldflags：-X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
 
 archives:
-  - format: tar.gz
-    format_overrides:
-      - goos: windows
-        format: zip
+  - formats:
+      - tar.gz
 
 # release 使用 git remote 推断 GitHub/GitLab 仓库；需设置 GITHUB_TOKEN 等
 release:
@@ -33,7 +31,7 @@ release:
 # Homebrew Formula：需先创建 tap 仓库（如 owner/homebrew-modu），并配置写权限
 brews:
   - name: modu
-    homepage: "https://github.com/{{ envOrDefault \"HOMEBREW_TAP_OWNER\" \"qimao\" }}/modu"
+    homepage: "https://github.com/{{ envOrDefault \"HOMEBREW_TAP_OWNER\" \"qimaotech\" }}/modu"
     description: "多模块 Git Worktree 管理工具"
     repository:
       owner: "{{ envOrDefault \"HOMEBREW_TAP_OWNER\" \"qimaotech\" }}"

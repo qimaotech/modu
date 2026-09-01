@@ -226,14 +226,16 @@ task build
 ### 构建与发布
 
 - **版本来源**：正式发布的二进制版本号由 [GoReleaser](https://goreleaser.com/) 在构建时通过 ldflags 注入；本地 `go build` 未注入，`modu version` 会显示 `dev` / `unknown`。
-- **安装 GoReleaser**：`go install github.com/goreleaser/goreleaser/v2@latest`（或参见 [官方安装说明](https://goreleaser.com/install)）。
 - **本地多平台构建（不发布）**：`goreleaser build --snapshot --clean`，产物在 `dist/`。
-- **发布新版本**（需在 main/master 分支）：
-  1. 打 tag：`git tag v1.2.3`
-  2. 执行：`task release`（内部会调用 `goreleaser release`）
-  3. 需配置 `GITHUB_TOKEN`（或所用 SCM 的 token）；若使用 Homebrew tap，需创建 tap 仓库并配置写权限，见 `.goreleaser.yml` 中 `brews` 及环境变量说明。
+- **发布新版本**：在默认分支的提交上创建并推送 `vX.Y.Z` 标签；Release Action 会自动执行测试、多平台构建并创建 GitHub Release。
+
+  ```bash
+  git tag v1.2.3
+  git push origin v1.2.3
+  ```
+
+- **Homebrew Formula**：安装 GoReleaser 并设置具备 tap 写权限的 `GITHUB_TOKEN`，执行 `task release` 时会同步更新。
 - 查看当前 tag 与发布提示：`task version:next`。
-- **详细步骤**（GitHub Release + Homebrew tap）：见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ## 技术栈
 
