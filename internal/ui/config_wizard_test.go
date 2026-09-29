@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,25 +10,31 @@ import (
 )
 
 func TestNewConfigWizard(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
 	wizard := NewConfigWizard()
 
 	if wizard.step != 0 {
 		t.Errorf("expected step 0, got %d", wizard.step)
 	}
-	if wizard.workspace != "/tmp/workspace" {
-		t.Errorf("expected workspace /tmp/workspace, got %s", wizard.workspace)
+	if wizard.workspace != "" {
+		t.Errorf("expected empty workspace, got %s", wizard.workspace)
 	}
-	if wizard.worktree != "/tmp/worktrees" {
-		t.Errorf("expected worktree /tmp/worktrees, got %s", wizard.worktree)
+	if wizard.worktree != "" {
+		t.Errorf("expected empty worktree, got %s", wizard.worktree)
 	}
-	if wizard.base != "develop" {
-		t.Errorf("expected base develop, got %s", wizard.base)
+	if wizard.base != "" {
+		t.Errorf("expected empty base, got %s", wizard.base)
 	}
 	if len(wizard.modules) != 0 {
 		t.Errorf("expected 0 modules, got %d", len(wizard.modules))
 	}
 	if wizard.inputField != 0 {
 		t.Errorf("expected inputField 0, got %d", wizard.inputField)
+	}
+	if wizard.workspaceDefault != tmpDir {
+		t.Errorf("expected workspaceDefault %s, got %s", tmpDir, wizard.workspaceDefault)
 	}
 	if wizard.quitting {
 		t.Error("expected quitting to be false")
@@ -90,7 +97,6 @@ func TestConfigWizard_Update_CharacterInput(t *testing.T) {
 	t.Run("步骤0输入到workspace", func(t *testing.T) {
 		w := NewConfigWizard()
 		w.step = 0
-		w.workspace = ""
 
 		msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}
 		_, cmd := w.Update(msg)
@@ -105,7 +111,6 @@ func TestConfigWizard_Update_CharacterInput(t *testing.T) {
 	t.Run("步骤1输入到worktree", func(t *testing.T) {
 		w := NewConfigWizard()
 		w.step = 1
-		w.worktree = ""
 
 		msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}}
 		_, cmd := w.Update(msg)
@@ -120,7 +125,6 @@ func TestConfigWizard_Update_CharacterInput(t *testing.T) {
 	t.Run("步骤2输入到base", func(t *testing.T) {
 		w := NewConfigWizard()
 		w.step = 2
-		w.base = ""
 
 		msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}}
 		_, cmd := w.Update(msg)
@@ -129,6 +133,18 @@ func TestConfigWizard_Update_CharacterInput(t *testing.T) {
 		}
 		if w.base != "c" {
 			t.Errorf("expected base 'c', got %s", w.base)
+		}
+	})
+
+	t.Run("步骤0粘贴整段路径", func(t *testing.T) {
+		w := NewConfigWizard()
+		w.step = 0
+
+		msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/data/workspace"), Paste: true}
+		_, _ = w.Update(msg)
+
+		if w.workspace != "/data/workspace" {
+			t.Errorf("expected workspace '/data/workspace', got %s", w.workspace)
 		}
 	})
 }
@@ -147,14 +163,16 @@ func TestConfigWizard_Update_Enter(t *testing.T) {
 	})
 
 	t.Run("步骤0空workspace默认.", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
 		w := NewConfigWizard()
 		w.step = 0
 		w.workspace = ""
 
 		msg := tea.KeyMsg{Type: tea.KeyEnter}
 		_, _ = w.Update(msg)
-		if w.workspace != "." {
-			t.Errorf("expected workspace '.', got %s", w.workspace)
+		if w.workspace != tmpDir {
+			t.Errorf("expected workspace %s, got %s", tmpDir, w.workspace)
 		}
 		if w.step != 1 {
 			t.Errorf("expected step 1, got %d", w.step)
@@ -275,6 +293,18 @@ func TestConfigWizard_Update_Backspace(t *testing.T) {
 			t.Errorf("expected base 'tes', got %s", w.base)
 		}
 	})
+
+	t.Run("步骤0退格支持多字节字符", func(t *testing.T) {
+		w := NewConfigWizard()
+		w.step = 0
+		w.workspace = "/tmp/工作区"
+
+		msg := tea.KeyMsg{Type: tea.KeyBackspace}
+		_, _ = w.Update(msg)
+		if w.workspace != "/tmp/工作" {
+			t.Errorf("expected workspace '/tmp/工作', got %s", w.workspace)
+		}
+	})
 }
 
 func TestConfigWizard_Update_ConfigSavedMsg(t *testing.T) {
@@ -316,6 +346,35 @@ func TestConfigWizard_View(t *testing.T) {
 		}
 	})
 
+	t.Run("步骤0空输入显示提示", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+		w := NewConfigWizard()
+		w.step = 0
+
+		view := w.View()
+		if !strings.Contains(view, tmpDir) {
+			t.Error("expected view to contain workspace hint")
+		}
+		if w.workspace != "" {
+			t.Errorf("expected workspace to stay empty, got %s", w.workspace)
+		}
+	})
+
+	t.Run("步骤0空输入显示清理后的当前目录提示", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		nestedDir := filepath.Join(tmpDir, "nested")
+		t.Chdir(tmpDir)
+
+		w := NewConfigWizard()
+		w.workspaceDefault = nestedDir
+
+		view := w.View()
+		if !strings.Contains(view, nestedDir) {
+			t.Errorf("expected view to contain workspace default %s", nestedDir)
+		}
+	})
+
 	t.Run("步骤1视图", func(t *testing.T) {
 		w := NewConfigWizard()
 		w.step = 1
@@ -333,6 +392,19 @@ func TestConfigWizard_View(t *testing.T) {
 		}
 	})
 
+	t.Run("步骤1空输入显示提示", func(t *testing.T) {
+		w := NewConfigWizard()
+		w.step = 1
+
+		view := w.View()
+		if !strings.Contains(view, "../worktrees") {
+			t.Error("expected view to contain worktree default '../worktrees'")
+		}
+		if w.worktree != "" {
+			t.Errorf("expected worktree to stay empty, got %s", w.worktree)
+		}
+	})
+
 	t.Run("步骤2视图", func(t *testing.T) {
 		w := NewConfigWizard()
 		w.step = 2
@@ -347,6 +419,19 @@ func TestConfigWizard_View(t *testing.T) {
 		}
 		if !strings.Contains(view, "main") {
 			t.Error("expected view to contain 'main'")
+		}
+	})
+
+	t.Run("步骤2空输入显示提示", func(t *testing.T) {
+		w := NewConfigWizard()
+		w.step = 2
+
+		view := w.View()
+		if !strings.Contains(view, "develop") {
+			t.Error("expected view to contain base hint")
+		}
+		if w.base != "" {
+			t.Errorf("expected base to stay empty, got %s", w.base)
 		}
 	})
 
@@ -401,8 +486,8 @@ func TestSavedConfigInfo(t *testing.T) {
 	info := SavedConfigInfo{
 		ConfigPath: "/path/to/.modu.yaml",
 		Workspace:  "/workspace",
-		Worktree:  "/worktrees",
-		Base:      "develop",
+		Worktree:   "/worktrees",
+		Base:       "develop",
 	}
 
 	if info.ConfigPath != "/path/to/.modu.yaml" {

@@ -30,32 +30,49 @@ var (
 
 	wizardHelpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("245"))
+
+	wizardPlaceholderStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240"))
+)
+
+const (
+	defaultWorktreePath = "../worktrees"
+	defaultBaseBranch   = "develop"
+	worktreeHint        = defaultWorktreePath
+	baseHint            = defaultBaseBranch
 )
 
 // ConfigWizard 配置初始化向导状态
 type ConfigWizard struct {
-	step       int    // 当前步骤: 0=workspace, 1=worktree-root, 2=default-base, 3=confirm
-	workspace  string // workspace仓库目录
-	worktree   string // worktree 目录
-	base       string // 默认基准分支
-	modules    []config.Module
-	moduleName string
-	moduleURL  string
-	inputField int // 0=moduleName, 1=moduleURL
-	err        error
-	quitting   bool
-	saved      bool
+	step             int    // 当前步骤: 0=workspace, 1=worktree-root, 2=default-base, 3=confirm
+	workspace        string // workspace仓库目录
+	worktree         string // worktree 目录
+	base             string // 默认基准分支
+	modules          []config.Module
+	moduleName       string
+	moduleURL        string
+	inputField       int // 0=moduleName, 1=moduleURL
+	workspaceDefault string
+	err              error
+	quitting         bool
+	saved            bool
 }
 
 // NewConfigWizard 创建配置向导
 func NewConfigWizard() *ConfigWizard {
+	workspaceDefault, err := os.Getwd()
+	if err != nil {
+		workspaceDefault = "."
+	}
+
 	return &ConfigWizard{
-		step:       0,
-		workspace:  "/tmp/workspace",
-		worktree:   "/tmp/worktrees",
-		base:       "develop",
-		modules:    []config.Module{},
-		inputField: 0,
+		step:             0,
+		workspace:        "",
+		worktree:         "",
+		base:             "",
+		modules:          []config.Module{},
+		inputField:       0,
+		workspaceDefault: workspaceDefault,
 	}
 }
 
@@ -81,35 +98,31 @@ func (m *ConfigWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *ConfigWizard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	key := msg.String()
-
-	switch key {
-	case "ctrl+c", "esc":
+	switch msg.Type {
+	case tea.KeyCtrlC, tea.KeyEsc:
 		m.quitting = true
 		return m, tea.Quit
-	case "enter":
+	case tea.KeyEnter:
 		return m.handleEnter()
-	case "backspace":
+	case tea.KeyBackspace:
 		return m.handleBackspace()
-	case "tab":
+	case tea.KeyTab:
 		return m, nil
+	case tea.KeyRunes:
+		return m.handleText(string(msg.Runes))
 	}
 
-	// 文字输入
-	if len(key) == 1 {
-		return m.handleChar(key[0])
-	}
 	return m, nil
 }
 
-func (m *ConfigWizard) handleChar(ch byte) (tea.Model, tea.Cmd) {
+func (m *ConfigWizard) handleText(text string) (tea.Model, tea.Cmd) {
 	switch m.step {
 	case 0:
-		m.workspace += string(ch)
+		m.workspace += text
 	case 1:
-		m.worktree += string(ch)
+		m.worktree += text
 	case 2:
-		m.base += string(ch)
+		m.base += text
 	}
 	return m, nil
 }
@@ -118,17 +131,17 @@ func (m *ConfigWizard) handleEnter() (tea.Model, tea.Cmd) {
 	switch m.step {
 	case 0:
 		if m.workspace == "" {
-			m.workspace = "."
+			m.workspace = m.workspaceDefault
 		}
 		m.step = 1
 	case 1:
 		if m.worktree == "" {
-			m.worktree = "../worktrees"
+			m.worktree = defaultWorktreePath
 		}
 		m.step = 2
 	case 2:
 		if m.base == "" {
-			m.base = "develop"
+			m.base = defaultBaseBranch
 		}
 		m.step = 3
 	case 3:
@@ -140,19 +153,21 @@ func (m *ConfigWizard) handleEnter() (tea.Model, tea.Cmd) {
 func (m *ConfigWizard) handleBackspace() (tea.Model, tea.Cmd) {
 	switch m.step {
 	case 0:
-		if len(m.workspace) > 0 {
-			m.workspace = m.workspace[:len(m.workspace)-1]
-		}
+		m.workspace = trimLastRune(m.workspace)
 	case 1:
-		if len(m.worktree) > 0 {
-			m.worktree = m.worktree[:len(m.worktree)-1]
-		}
+		m.worktree = trimLastRune(m.worktree)
 	case 2:
-		if len(m.base) > 0 {
-			m.base = m.base[:len(m.base)-1]
-		}
+		m.base = trimLastRune(m.base)
 	}
 	return m, nil
+}
+
+func trimLastRune(value string) string {
+	runes := []rune(value)
+	if len(runes) == 0 {
+		return value
+	}
+	return string(runes[:len(runes)-1])
 }
 
 func (m *ConfigWizard) doSaveConfig() tea.Msg {
@@ -199,6 +214,13 @@ func (m *ConfigWizard) doSaveConfig() tea.Msg {
 		worktree:   m.worktree,
 		base:       m.base,
 	}
+}
+
+func (m *ConfigWizard) renderInput(value, placeholder string) string {
+	if value == "" {
+		return "> " + wizardPlaceholderStyle.Render(placeholder) + "_"
+	}
+	return "> " + value + "_"
 }
 
 // ensureGitRepo 检查并初始化 git 仓库
@@ -285,7 +307,7 @@ func (m *ConfigWizard) View() string {
 			"该文件夹是为 Git 版本控制目录（如果不是，将自动帮您初始化）；\n\n" +
 			"请输入："))
 		s.WriteString("\n\n")
-		s.WriteString(wizardInputStyle.Render("> " + m.workspace + "_"))
+		s.WriteString(wizardInputStyle.Render(m.renderInput(m.workspace, m.workspaceDefault)))
 		s.WriteString("\n\n")
 		s.WriteString(wizardHelpStyle.Render("团队使用推荐使用环境变量，个人使用推荐填写绝对路径"))
 		s.WriteString("\n\n")
@@ -297,7 +319,7 @@ func (m *ConfigWizard) View() string {
 		s.WriteString(wizardItemStyle.Render("Worktree 目录，用来存放各个特性分支代码的目录；\n\n" +
 			"请输入："))
 		s.WriteString("\n\n")
-		s.WriteString(wizardInputStyle.Render("> " + m.worktree + "_"))
+		s.WriteString(wizardInputStyle.Render(m.renderInput(m.worktree, worktreeHint)))
 		s.WriteString("\n\n")
 		s.WriteString(wizardHelpStyle.Render("团队使用推荐使用环境变量，个人使用推荐填写绝对路径"))
 		s.WriteString("\n\n")
@@ -310,7 +332,7 @@ func (m *ConfigWizard) View() string {
 			"注意各子模块也需要有此分支。\n\n" +
 			"请输入："))
 		s.WriteString("\n\n")
-		s.WriteString(wizardInputStyle.Render("> " + m.base + "_"))
+		s.WriteString(wizardInputStyle.Render(m.renderInput(m.base, baseHint)))
 		s.WriteString("\n\n")
 		s.WriteString(wizardHelpStyle.Render("比如: develop, main, master"))
 		s.WriteString("\n\n")
