@@ -1081,6 +1081,7 @@ type uiFakeCreateWorktreeCall struct {
 }
 
 type uiFakeGitClient struct {
+	gitproxy.GitClient  // 未使用的 Git 操作由具体场景提供。
 	remoteBranches      map[string]bool
 	pushStatuses        map[string]gitproxy.BranchPushStatus
 	createWorktreeCalls []uiFakeCreateWorktreeCall

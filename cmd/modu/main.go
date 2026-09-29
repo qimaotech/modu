@@ -97,6 +97,15 @@ func main() {
 	createCmd.Flags().String("base", "develop", "基准分支")
 	createCmd.Flags().StringSlice("modules", nil, "指定要创建的模块（逗号分隔），默认创建所有模块")
 
+	checkoutCmd := &cobra.Command{
+		Use:     "checkout <feature>",
+		Short:   "按远程 feature 自动接手主项目及相关模块",
+		Long:    "查询主项目 origin 和配置中各模块的同名远程分支，按需克隆并建立 worktree，无需指定模块或基线。\n已有 worktree 保留本地内容；同步后续提交请使用 modu update <feature>。",
+		Args:    cobra.ExactArgs(1),
+		Run:     runCheckout,
+		Example: "  modu checkout feature/xxx\n  modu checkout feature/xxx -o json",
+	}
+
 	// delete 命令
 	deleteCmd := &cobra.Command{
 		Use:   "delete <feature>",
@@ -221,7 +230,7 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(createCmd, deleteCmd, defaultSelectCmd, listCmd, infoCmd, configCmd, initCmd, statusCmd, updateCmd, tuiCmd, versionCmd)
+	rootCmd.AddCommand(createCmd, checkoutCmd, deleteCmd, defaultSelectCmd, listCmd, infoCmd, configCmd, initCmd, statusCmd, updateCmd, tuiCmd, versionCmd)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
