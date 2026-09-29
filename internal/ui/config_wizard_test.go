@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -145,6 +147,19 @@ func TestConfigWizard_Update_CharacterInput(t *testing.T) {
 
 		if w.workspace != "/data/workspace" {
 			t.Errorf("expected workspace '/data/workspace', got %s", w.workspace)
+		}
+	})
+
+	t.Run("步骤0手动输入空格", func(t *testing.T) {
+		w := NewConfigWizard()
+		w.step = 0
+		w.workspace = "/data/my"
+
+		msg := tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
+		_, _ = w.Update(msg)
+
+		if w.workspace != "/data/my " {
+			t.Errorf("expected workspace '/data/my ', got %s", w.workspace)
 		}
 	})
 }
@@ -364,7 +379,6 @@ func TestConfigWizard_View(t *testing.T) {
 	t.Run("步骤0空输入显示清理后的当前目录提示", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		nestedDir := filepath.Join(tmpDir, "nested")
-		t.Chdir(tmpDir)
 
 		w := NewConfigWizard()
 		w.workspaceDefault = nestedDir
@@ -480,6 +494,37 @@ func TestConfigWizard_View(t *testing.T) {
 			t.Error("expected view to contain '未知状态'")
 		}
 	})
+}
+
+func TestConfigWizard_EnsureGitRepo_UsesParentRepository(t *testing.T) {
+	parentDir := t.TempDir()
+	workspacePath := filepath.Join(parentDir, "workspace")
+	if err := os.MkdirAll(workspacePath, 0755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+
+	runGitCommand(t, parentDir, "init")
+	runGitCommand(t, parentDir, "config", "user.email", "modu-test@example.com")
+	runGitCommand(t, parentDir, "config", "user.name", "modu-test")
+	runGitCommand(t, parentDir, "commit", "--allow-empty", "-m", "initial")
+
+	wizard := NewConfigWizard()
+	if err := wizard.ensureGitRepo(workspacePath, "develop"); err != nil {
+		t.Fatalf("ensureGitRepo returned an error: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(workspacePath, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("expected no nested .git directory, stat error: %v", err)
+	}
+}
+
+func runGitCommand(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, output)
+	}
 }
 
 func TestSavedConfigInfo(t *testing.T) {
