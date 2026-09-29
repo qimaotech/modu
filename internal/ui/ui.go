@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/atotto/clipboard"
@@ -16,6 +17,8 @@ import (
 	"github.com/qimaotech/modu/internal/config"
 	"github.com/qimaotech/modu/internal/core"
 	"github.com/qimaotech/modu/internal/engine"
+	"github.com/qimaotech/modu/internal/output"
+	"github.com/qimaotech/modu/internal/progress"
 )
 
 // 全局样式
@@ -136,6 +139,17 @@ func (e *FeatureEntry) GetDirtyCount() int {
 
 // TUI App 状态
 type App struct {
+	ctx              context.Context
+	operationCancel  context.CancelFunc
+	operationID      uint64
+	progress         *progress.Tracker
+	progressFrame    int
+	cancelling       bool
+	width, height    int
+	statusID         uint64
+	statusCancel     context.CancelFunc
+	statusLoading    bool
+	statusesPending  bool
 	Engine           *engine.Engine
 	Envs             []core.WorktreeEnv
 	mainProject      *engine.MainProjectStatus
@@ -172,20 +186,10 @@ func New(cfg *config.Config) *App {
 }
 
 // Model 实现 tea.Model 接口
-func (m *App) Init() tea.Cmd {
-	return m.loadEnvs
-}
-
-func (m *App) loadEnvs() tea.Msg {
-	envs, err := m.Engine.ListWorktrees(context.Background())
-	if err != nil {
-		return errorMsg{err}
-	}
-	main, _ := m.Engine.GetMainProject(context.Background())
-	return loadedMsg{envs: envs, mainProject: main}
-}
+func (m *App) Init() tea.Cmd { return m.loadEnvsCommand() }
 
 type loadedMsg struct {
+	summary     bool
 	envs        []core.WorktreeEnv
 	mainProject *engine.MainProjectStatus
 }
@@ -198,7 +202,16 @@ type updateDoneMsg struct {
 }
 
 // refreshListMsg 请求重新加载列表（如模块变更后）
-type refreshListMsg struct{}
+type refreshListMsg struct {
+	feature, message string
+	err              error
+}
+
+type remoteBranchesMsg struct{ branches map[string]bool }
+type deleteDoneMsg struct {
+	feature string
+	err     error
+}
 
 type createFeatureDoneMsg struct {
 	feature string
@@ -211,10 +224,103 @@ type errorMsg struct {
 
 func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+	case operationTickMsg:
+		if uint64(msg) == m.operationID && m.operationCancel != nil {
+			m.progressFrame++
+			return m, operationTick(m.operationID)
+		}
+	case operationResultMsg:
+		if msg.id != m.operationID {
+			return m, nil
+		}
+		if m.operationCancel != nil {
+			m.operationCancel()
+			m.operationCancel = nil
+		}
+		if msg.cancelled {
+			m.state = "list"
+			m.message = "操作已取消"
+			switch result := msg.message.(type) {
+			case updateDoneMsg:
+				m.message = fmt.Sprintf("更新已取消，已完成 %d 个仓库；已完成的更新保留", result.success)
+				return m, m.refreshAffected(result.feature)
+			case refreshListMsg:
+				return m, m.refreshAffected(result.feature)
+			case createFeatureDoneMsg, deleteDoneMsg:
+				return m, m.loadEnvsCommand()
+			}
+			return m, m.resumePendingStatuses()
+		}
+		return m.Update(msg.message)
+	case statusRefreshedMsg:
+		if msg.id != m.statusID {
+			return m, nil
+		}
+		m.statusLoading = false
+		m.statusCancel = nil
+		if msg.err != nil {
+			m.message = "状态刷新失败: " + msg.err.Error()
+			return m, nil
+		}
+		if msg.all {
+			m.Envs = msg.envs
+			m.mainProject = msg.main
+			m.statusesPending = false
+		} else if msg.feature == "" {
+			m.mainProject = msg.main
+		} else if len(msg.envs) > 0 {
+			found := false
+			for i := range m.Envs {
+				if m.Envs[i].DirName == msg.envs[0].DirName {
+					m.Envs[i] = msg.envs[0]
+					found = true
+					break
+				}
+			}
+			if !found {
+				m.Envs = append(m.Envs, msg.envs[0])
+			}
+		}
+		if !msg.all && m.statusesPending {
+			return m, m.refreshStatuses("", true)
+		}
+	case remoteBranchesMsg:
+		m.moduleSelector = NewModuleSelector(m.Engine.Config.Modules, nil, msg.branches, m.Engine.Config.DefaultSelectedModules, "选择要创建的项目/模块")
+		m.moduleCursor = 0
+		m.state = "create_modules"
+	case deleteDoneMsg:
+		if msg.err != nil {
+			var unpushed *engine.UnpushedBranchesError
+			if errors.As(msg.err, &unpushed) {
+				m.unpushedBranches = unpushed.Branches
+				m.state = "confirm_unpushed"
+				return m, nil
+			}
+			m.err = msg.err
+			m.state = "error"
+			return m, nil
+		}
+		remaining := make([]core.WorktreeEnv, 0, len(m.Envs))
+		for _, env := range m.Envs {
+			if env.DirName != engine.FeatureToDirName(msg.feature) && env.Name != msg.feature {
+				remaining = append(remaining, env)
+			}
+		}
+		m.Envs = remaining
+		m.state = "list"
+		m.selected = 0
+		m.unpushedBranches = nil
+		m.message = "已删除 feature: " + msg.feature
 	case loadedMsg:
 		m.Envs = msg.envs
 		m.mainProject = msg.mainProject
 		m.state = "list"
+		if msg.summary {
+			m.statusesPending = true
+			return m, m.refreshStatuses("", true)
+		}
 	case updateDoneMsg:
 		if len(msg.failed) == 0 {
 			if msg.feature != "" {
@@ -229,13 +335,21 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for name := range msg.failed {
 				names = append(names, name)
 			}
+			sort.Strings(names)
 			m.message = fmt.Sprintf("更新成功: %d 个，失败: %d 个 (%s)", msg.success, len(msg.failed), strings.Join(names, ", "))
+			for _, name := range names {
+				m.message += fmt.Sprintf("\n%s: %v", name, msg.failed[name])
+			}
 		}
-		m.state = "loading"
-		return m, m.loadEnvs
+		m.state = "list"
+		return m, m.refreshAffected(msg.feature)
 	case refreshListMsg:
-		m.state = "loading"
-		return m, m.loadEnvs
+		m.message = msg.message
+		if msg.err != nil {
+			m.message = msg.err.Error()
+		}
+		m.state = "list"
+		return m, m.refreshAffected(msg.feature)
 	case createFeatureDoneMsg:
 		if msg.err != nil {
 			m.err = msg.err
@@ -244,12 +358,21 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.message = "已创建 feature: " + msg.feature
 		m.resetCreateFeature()
-		m.state = "loading"
-		return m, m.loadEnvs
+		m.state = "list"
+		return m, m.refreshAffected(msg.feature)
 	case errorMsg:
 		m.err = msg.err
 		m.state = "error"
 	case tea.KeyMsg:
+		if m.state == "loading" {
+			if msg.String() == "ctrl+c" || msg.String() == "esc" || msg.String() == "q" {
+				if m.operationCancel != nil {
+					m.operationCancel()
+					m.cancelling = true
+				}
+			}
+			return m, nil
+		}
 		switch m.state {
 		case "list":
 			return m.handleListKey(msg)
@@ -270,7 +393,7 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = nil
 		}
 	}
-	return m, nil
+	return m, m.resumePendingStatuses()
 }
 
 func (m *App) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -355,7 +478,10 @@ func (m *App) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "n":
 		m.startCreateFeature()
-	case "q", "esc":
+	case "r":
+		return m, m.loadEnvsCommand()
+	case "q", "esc", "ctrl+c":
+		m.stopStatusRefresh()
 		return m, tea.Quit
 	}
 	return m, nil
@@ -581,17 +707,6 @@ func (m *App) openAppByName(appName string) {
 func (m *App) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "enter":
-		branches, err := m.Engine.CheckDeleteUnpushedBranches(context.Background(), m.feature)
-		if err != nil {
-			m.err = err
-			m.state = "error"
-			return m, nil
-		}
-		if len(branches) > 0 {
-			m.unpushedBranches = branches
-			m.state = "confirm_unpushed"
-			return m, nil
-		}
 		return m.deleteFeature(false)
 	case "n", "esc":
 		m.state = "list"
@@ -608,24 +723,16 @@ func (m *App) handleUnpushedConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.unpushedBranches = nil
 		m.state = "list"
 	}
-	return m, nil
+	return m, m.resumePendingStatuses()
 }
 
 // deleteFeature 执行 feature 删除并刷新列表。
 func (m *App) deleteFeature(allowUnpushedBranches bool) (tea.Model, tea.Cmd) {
-	err := m.Engine.DeleteWorktreeWithOptions(context.Background(), m.feature, false, engine.DeleteOptions{
-		AllowUnpushedBranches: allowUnpushedBranches,
+	feature := m.feature
+	return m, m.startOperation("正在删除 feature", func(ctx context.Context) tea.Msg {
+		err := m.Engine.DeleteWorktreeWithOptions(ctx, feature, false, engine.DeleteOptions{AllowUnpushedBranches: allowUnpushedBranches})
+		return deleteDoneMsg{feature: feature, err: err}
 	})
-	if err != nil {
-		m.err = err
-		m.state = "error"
-		return m, nil
-	}
-	m.message = "已删除 feature: " + m.feature
-	m.unpushedBranches = nil
-	m.state = "loading"
-	m.selected = 0
-	return m, m.loadEnvs
 }
 
 // initModuleSelector 初始化模块选择器
@@ -700,7 +807,7 @@ func (m *App) handleModulesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		// 回车确认，执行模块增删
-		return m, m.executeModulesChange
+		return m, m.startOperation("正在更新模块", m.executeModulesChange)
 	case "q", "esc":
 		// 返回操作菜单
 		m.state = "menu"
@@ -727,9 +834,10 @@ func (m *App) resetCreateFeature() {
 	m.moduleCursor = 0
 }
 
-func (m *App) cancelCreateFeature() {
+func (m *App) cancelCreateFeature() tea.Cmd {
 	m.resetCreateFeature()
 	m.state = "list"
+	return m.resumePendingStatuses()
 }
 
 func (m *App) handleCreateInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -737,7 +845,7 @@ func (m *App) handleCreateInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "esc", "ctrl+c":
-		m.cancelCreateFeature()
+		return m, m.cancelCreateFeature()
 	case "enter":
 		feature := strings.TrimSpace(string(m.createFeatureInput))
 		if feature == "" {
@@ -746,8 +854,7 @@ func (m *App) handleCreateInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.createFeature = feature
 		m.createFeatureError = ""
-		m.initCreateModuleSelector()
-		m.state = "create_modules"
+		return m, m.initCreateModuleSelector()
 	case "left":
 		if m.createFeatureCursor > 0 {
 			m.createFeatureCursor--
@@ -794,23 +901,15 @@ func (m *App) clampCreateFeatureCursor() {
 	}
 }
 
-func (m *App) initCreateModuleSelector() {
-	var modules []config.Module
-	var defaultSelected []string
-	remoteHasBranch := make(map[string]bool)
-
-	if m.Engine != nil && m.Engine.Config != nil {
-		modules = m.Engine.Config.Modules
-		defaultSelected = m.Engine.Config.DefaultSelectedModules
-		var err error
-		remoteHasBranch, err = m.Engine.GetModulesWithRemoteBranch(context.Background(), m.createFeature)
+func (m *App) initCreateModuleSelector() tea.Cmd {
+	feature := m.createFeature
+	return m.startOperation("正在查询远端分支", func(ctx context.Context) tea.Msg {
+		branches, err := m.Engine.GetModulesWithRemoteBranch(ctx, feature)
 		if err != nil {
-			remoteHasBranch = make(map[string]bool)
+			return errorMsg{err}
 		}
-	}
-
-	m.moduleSelector = NewModuleSelector(modules, nil, remoteHasBranch, defaultSelected, "选择要创建的项目/模块")
-	m.moduleCursor = 0
+		return remoteBranchesMsg{branches: branches}
+	})
 }
 
 func (m *App) handleCreateModulesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -831,25 +930,25 @@ func (m *App) handleCreateModulesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state = "loading"
 		return m, m.executeCreateFeature()
 	case "q", "esc", "ctrl+c":
-		m.cancelCreateFeature()
+		return m, m.cancelCreateFeature()
 	}
 	return m, nil
 }
 
 // executeUpdateCode 执行主项目+模块更新，返回在后台运行并发送 updateDoneMsg 的 Cmd
 func (m *App) executeUpdateCode() tea.Cmd {
-	return func() tea.Msg {
-		success, failed := m.Engine.UpdateMainProject(context.Background())
+	return m.startOperation("正在更新", func(ctx context.Context) tea.Msg {
+		success, failed := m.Engine.UpdateMainProject(ctx)
 		return updateDoneMsg{success: success, failed: failed, feature: ""}
-	}
+	})
 }
 
 // executeUpdateWorktree 执行指定 feature 的 worktree 更新
 func (m *App) executeUpdateWorktree(feature string) tea.Cmd {
-	return func() tea.Msg {
-		success, failed := m.Engine.UpdateWorktree(context.Background(), feature)
+	return m.startOperation("正在更新 "+feature, func(ctx context.Context) tea.Msg {
+		success, failed := m.Engine.UpdateWorktree(ctx, feature)
 		return updateDoneMsg{success: success, failed: failed, feature: feature}
-	}
+	})
 }
 
 func (m *App) executeCreateFeature() tea.Cmd {
@@ -859,7 +958,7 @@ func (m *App) executeCreateFeature() tea.Cmd {
 		selectedModules = m.moduleSelector.SelectedModules()
 	}
 
-	return func() tea.Msg {
+	return m.startOperation("正在创建 "+feature, func(ctx context.Context) tea.Msg {
 		if m.Engine == nil || m.Engine.Config == nil || m.Engine.GitProxy == nil {
 			return createFeatureDoneMsg{feature: feature, err: errors.New("TUI 引擎未初始化")}
 		}
@@ -867,14 +966,14 @@ func (m *App) executeCreateFeature() tea.Cmd {
 		createCfg := *m.Engine.Config
 		createCfg.Modules = append([]config.Module(nil), selectedModules...)
 		createEngine := engine.NewWithClient(&createCfg, m.Engine.GitProxy)
-		if err := createEngine.CreateWorktree(context.Background(), feature, createCfg.DefaultBase); err != nil {
+		if err := createEngine.CreateWorktree(ctx, feature, createCfg.DefaultBase); err != nil {
 			return createFeatureDoneMsg{feature: feature, err: err}
 		}
 		return createFeatureDoneMsg{feature: feature}
-	}
+	})
 }
 
-func (m *App) executeModulesChange() tea.Msg {
+func (m *App) executeModulesChange(ctx context.Context) tea.Msg {
 	selectedModules := m.moduleSelector.SelectedModules()
 
 	var env *core.WorktreeEnv
@@ -885,7 +984,7 @@ func (m *App) executeModulesChange() tea.Msg {
 		}
 	}
 	if env == nil {
-		return errorMsg{fmt.Errorf("未找到 feature %s: %w", m.modulesFeature, ErrFeatureNotFound)}
+		return refreshListMsg{feature: m.modulesFeature, err: fmt.Errorf("未找到 feature %s: %w", m.modulesFeature, ErrFeatureNotFound)}
 	}
 	existingModules := make(map[string]bool)
 	for _, mod := range env.Modules {
@@ -918,28 +1017,34 @@ func (m *App) executeModulesChange() tea.Msg {
 
 	// 执行添加
 	for _, modName := range toAdd {
-		err := m.Engine.AddModule(context.Background(), m.modulesFeature, modName)
+		err := m.Engine.AddModule(ctx, m.modulesFeature, modName)
 		if err != nil {
-			return errorMsg{fmt.Errorf("添加模块 %s 失败: %w", modName, err)}
+			return refreshListMsg{feature: m.modulesFeature, err: fmt.Errorf("添加模块 %s 失败: %w", modName, err)}
 		}
 	}
 
 	// 执行删除
 	for _, modName := range toRemove {
-		err := m.Engine.RemoveModule(context.Background(), m.modulesFeature, modName)
+		err := m.Engine.RemoveModule(ctx, m.modulesFeature, modName)
 		if err != nil {
-			return errorMsg{fmt.Errorf("删除模块 %s 失败: %w", modName, err)}
+			return refreshListMsg{feature: m.modulesFeature, err: fmt.Errorf("删除模块 %s 失败: %w", modName, err)}
 		}
 	}
 
-	m.message = fmt.Sprintf("模块已更新: 添加 %d, 删除 %d", len(toAdd), len(toRemove))
-	return refreshListMsg{}
+	return refreshListMsg{feature: m.modulesFeature, message: fmt.Sprintf("模块已更新: 添加 %d, 删除 %d", len(toAdd), len(toRemove))}
 }
 
 func (m *App) View() string {
 	switch m.state {
 	case "loading":
-		return "Loading..."
+		if m.progress == nil {
+			return "正在加载…"
+		}
+		view := output.RenderProgress(m.progress.Snapshot(), m.progressFrame, m.width, max(1, m.height-5))
+		if m.cancelling {
+			view = "正在取消，等待 Git 结束…\n" + view
+		}
+		return view
 	case "list":
 		return m.renderList()
 	case "menu":
@@ -990,12 +1095,15 @@ func (m *App) renderList() string {
 	var s strings.Builder
 	s.WriteString(headerStyle.Render("modu - Worktree Manager"))
 	s.WriteString("\n\n")
-	s.WriteString(itemStyle.Render("↑/↓ 选择  Enter 回车  n 新建 feature  m 管理模块  u 更新代码  c 复制路径\nd 删除  o 打开 VS Code  x 打开 Codex  q/esc 退出"))
+	s.WriteString(itemStyle.Render("↑/↓ 选择  Enter 回车  n 新建 feature  m 管理模块  u 更新代码  c 复制路径\nd 删除  o 打开 VS Code  x 打开 Codex  q/esc 退出  r 刷新"))
 	s.WriteString("\n\n")
 
 	total := m.listEntryCount()
 	if total == 0 {
 		s.WriteString(itemStyle.Render("No features found. Use CLI to create one: modu create <feature>"))
+		if m.message != "" {
+			s.WriteString("\n" + itemStyle.Render(m.message))
+		}
 		return s.String()
 	}
 
@@ -1004,6 +1112,9 @@ func (m *App) renderList() string {
 		status := successStyle.Render("clean")
 		if m.mainProject.IsDirty {
 			status = errorStyle.Render("dirty")
+		}
+		if m.statusesPending {
+			status = "检查中"
 		}
 		line := fmt.Sprintf("→ %s [主项目] (%s) [%s]", m.mainProject.Name, status, m.mainProject.Branch)
 		if m.selected == 0 {
@@ -1017,14 +1128,32 @@ func (m *App) renderList() string {
 	for i := range m.Envs {
 		env := &m.Envs[i]
 		dirtyCount := 0
+		unknownCount := 0
+		if env.MainProject != nil {
+			if env.MainProject.IsDirty {
+				dirtyCount++
+			}
+			if env.MainProject.Error != nil {
+				unknownCount++
+			}
+		}
 		for _, mod := range env.Modules {
 			if mod.IsDirty {
 				dirtyCount++
+			}
+			if mod.Error != nil {
+				unknownCount++
 			}
 		}
 		status := successStyle.Render("clean")
 		if dirtyCount > 0 {
 			status = errorStyle.Render(fmt.Sprintf("%d dirty", dirtyCount))
+		}
+		if unknownCount > 0 {
+			status = errorStyle.Render(fmt.Sprintf("%d dirty，%d 个状态未知", dirtyCount, unknownCount))
+		}
+		if m.statusesPending {
+			status = "检查中"
 		}
 		prefix := "  "
 		if m.selected == row {
@@ -1040,10 +1169,12 @@ func (m *App) renderList() string {
 		row++
 	}
 
+	if m.statusLoading {
+		s.WriteString("\n正在刷新状态…\n")
+	}
 	if m.message != "" {
 		s.WriteString("\n")
-		s.WriteString(successStyle.Render(m.message))
-		m.message = ""
+		s.WriteString(itemStyle.Render(m.message))
 	}
 
 	return s.String()
@@ -1227,8 +1358,12 @@ func (m *App) renderError() string {
 }
 
 // Run 启动 TUI
-func Run(cfg *config.Config) error {
-	p := tea.NewProgram(New(cfg), tea.WithAltScreen())
+func Run(ctx context.Context, cfg *config.Config) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	app := New(cfg)
+	app.ctx = ctx
+	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithContext(ctx))
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("failed to run TUI: %w", err)
 	}
@@ -1236,12 +1371,12 @@ func Run(cfg *config.Config) error {
 }
 
 // StartTUI 启动 TUI（从 CLI 调用）
-func StartTUI(configPath string) error {
+func StartTUI(ctx context.Context, configPath string) error {
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-	return Run(cfg)
+	return Run(ctx, cfg)
 }
 
 // SelectModules 让用户选择模块（空格选中，上下键切换，回车确认）

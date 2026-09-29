@@ -8,10 +8,10 @@
 
 ## 接口职责（GitClient）
 
-- **Clone(ctx, url, path)**：克隆仓库到指定路径；失败返回带 `ERR_GIT_EXEC` 的上下文错误。
+- **Clone(ctx, url, path, options)**：先克隆到同级临时目录，成功后移动到指定路径；失败或取消清理本次临时目录，保留已有目标目录。默认完整克隆，可选 `Filter: "blob:none"`；失败返回带 `ERR_GIT_EXEC` 的上下文错误。
 - **CreateWorktree(ctx, repoPath, branch, baseBranch, worktreePath)**：在 repoPath 仓库中先 fetch，再 `worktree add -b <branch> <worktreePath> <baseBranch>`；失败返回带上下文的 `ERR_GIT_EXEC`。
 - **CreateWorktreeFromRemoteBranch(ctx, repoPath, branch, worktreePath)**：显式将 `refs/heads/<branch>` 拉取到 `origin/<branch>`，并创建同名本地 tracking 分支的 worktree；必须兼容 single-branch clone 或受限的 remote fetch refspec。
-- **GetStatus(ctx, path)**：在 path 执行 `git status --porcelain`，解析为 Status（IsDirty、Branch）；目录不存在返回 `ERR_MODULE_NOT_FOUND`。
+- **GetStatus(ctx, path)**：在 path 执行一次 `git status --porcelain=v2 --branch -z`，同时解析分支、脏状态与文件路径；目录不存在返回 `ERR_MODULE_NOT_FOUND`。
 - **RemoveWorktree(ctx, path)**：`git worktree remove <path>`；若 remove 失败可回退为 `os.RemoveAll(path)`（实现可选）。
 - **RemoveWorktreeAndBranch(ctx, repoPath, worktreePath, featureDirName)**：在移除 worktree **之前**对 `worktreePath` 调用 `GetStatus` 取得当前检出分支；仅当将该分支名中的 `/` 全部替换为 `-` 后的字符串与 `featureDirName`（与 `worktree-root` 下该 feature 的目录 basename 一致）相同时，才在 `repoPath` 上对该分支执行 `git branch -D`。若无法读状态、detached HEAD（`HEAD`）、或不一致，则仍执行 worktree remove / prune，但**不删除分支**（防误删）。`featureDirName` 规则与引擎侧「分支名 → 目录名」转换一致（`/ → -`）。
 - **FetchAndSwitchBranch(ctx, repoPath, branch)**：在 repoPath 仓库中先执行 `git fetch origin` 拉取最新，再执行 `git checkout <branch>` 切换到指定分支；若分支不存在返回错误；若切换失败返回带 `ERR_GIT_EXEC` 的上下文错误。
@@ -19,8 +19,8 @@
 
 ## Status 解析
 
-- `git status --porcelain` 有输出（含 M、??、D 等）视为 **Dirty**；无输出视为 **Clean**。
-- Branch 可通过 `git rev-parse --abbrev-ref HEAD` 或等价方式获取（在 path 下执行）。
+- porcelain v2 的文件记录（含修改、未跟踪、删除及冲突）视为 **Dirty**；仅含分支头记录时为 **Clean**。
+- 以 NUL 分隔记录，保留空格和换行文件名，并正确处理重命名与 detached HEAD。
 
 ## 错误约定
 

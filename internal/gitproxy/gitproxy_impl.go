@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -22,11 +22,39 @@ func New() GitClient {
 }
 
 // Clone 克隆仓库
-func (g *GitProxy) Clone(ctx context.Context, url, path string) error {
-	cmd := exec.CommandContext(ctx, "git", "clone", url, path)
-	out, err := cmd.CombinedOutput()
+func (g *GitProxy) Clone(ctx context.Context, url, path string, options CloneOptions) error {
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("clone destination already exists: %s: %w", path, errors.ErrInvalidOperation)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	temporaryPath, err := os.MkdirTemp(filepath.Dir(path), ".modu-clone-")
 	if err != nil {
-		return fmt.Errorf("[git clone] failed to clone %s to %s: %w, output: %s", url, path, errors.ErrGitExec, string(out))
+		return err
+	}
+	defer os.RemoveAll(temporaryPath)
+	args := []string{"clone", "--progress"}
+	if options.Filter != "" {
+		args = append(args, "--filter="+options.Filter)
+	}
+	args = append(args, "--", url, temporaryPath)
+	out, err := runProgress(ctx, "克隆", args...)
+	if err != nil {
+		return fmt.Errorf("[git clone] %s: %w: %w, output: %s", path, errors.ErrGitExec, commandCause(ctx, err), out)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("clone destination already exists: %s: %w", path, errors.ErrInvalidOperation)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("finish clone %s: %w", path, err)
 	}
 	return nil
 }
@@ -39,7 +67,7 @@ func (g *GitProxy) CreateWorktree(ctx context.Context, repoPath, branch, baseBra
 	}
 
 	// 创建 worktree
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "add", "-b", branch, worktreePath, baseBranch)
+	cmd := gitCommand(ctx, "-C", repoPath, "worktree", "add", "-b", branch, worktreePath, baseBranch)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("[git worktree add] failed to create worktree at %s: %w, output: %s", worktreePath, errors.ErrGitExec, string(out))
@@ -55,7 +83,7 @@ func (g *GitProxy) CreateWorktreeFromExistingBranch(ctx context.Context, repoPat
 	}
 
 	// 从现有分支创建 worktree（不带 -b 参数）
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "add", worktreePath, branch)
+	cmd := gitCommand(ctx, "-C", repoPath, "worktree", "add", worktreePath, branch)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("[git worktree add] failed to create worktree from branch %s at %s: %w, output: %s", branch, worktreePath, errors.ErrGitExec, string(out))
@@ -70,24 +98,30 @@ func (g *GitProxy) GetStatus(ctx context.Context, path string) (Status, error) {
 		return Status{}, fmt.Errorf("[git status] path does not exist: %s, %w", path, errors.ErrModuleNotFound)
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "-C", path, "status", "--porcelain")
+	cmd := gitCommand(ctx, "-C", path, "status", "--porcelain=v2", "--branch", "-z")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return Status{}, fmt.Errorf("[git status] failed to get status for %s: %w, output: %s", path, errors.ErrGitExec, string(out))
+		return Status{}, fmt.Errorf("[git status] failed to get status for %s: %w, output: %s: %w", path, errors.ErrGitExec, string(out), commandCause(ctx, err))
 	}
 
-	return parseStatus(ctx, string(out), path)
+	return parseStatus(string(out)), nil
 }
 
 // RemoveWorktree 删除工作树
 func (g *GitProxy) RemoveWorktree(ctx context.Context, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// 先用 git worktree remove 移除
-	cmd := exec.CommandContext(ctx, "git", "worktree", "remove", path)
+	cmd := gitCommand(ctx, "worktree", "remove", path)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		// 如果 worktree remove 失败，尝试直接删除目录
 		if rmErr := os.RemoveAll(path); rmErr != nil {
-			return fmt.Errorf("[git worktree remove] failed to remove worktree at %s: %w, output: %s", path, errors.ErrGitExec, string(out))
+			return fmt.Errorf("[git worktree remove] failed to remove worktree at %s: %w, output: %s: %w", path, errors.ErrGitExec, string(out), commandCause(ctx, err))
 		}
 		return nil
 	}
@@ -101,6 +135,9 @@ func branchToFeatureDirSlug(branch string) string {
 
 // RemoveWorktreeAndBranch 删除 worktree；仅当当前检出分支的 slug 与 featureDirName 一致时才删除该分支
 func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktreePath, featureDirName string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	logger.Debug("RemoveWorktreeAndBranch: repo=%s, featureDirName=%s, path=%s", repoPath, featureDirName, worktreePath)
 
 	status, err := g.GetStatus(ctx, worktreePath)
@@ -122,10 +159,13 @@ func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktr
 	}
 
 	// 先用 git worktree remove 移除
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "remove", "--force", worktreePath)
+	cmd := gitCommand(ctx, "-C", repoPath, "worktree", "remove", "--force", worktreePath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		logger.Warn("git worktree remove 失败，尝试直接删除目录: path=%s, error=%s", worktreePath, string(out))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		// 如果 worktree remove 失败，尝试直接删除目录
 		if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
 			logger.Error("删除目录失败: path=%s, error=%v", worktreePath, rmErr)
@@ -134,8 +174,11 @@ func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktr
 		logger.Info("直接删除目录成功: %s", worktreePath)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// 先 prune 清理过期的 worktree 引用
-	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "prune")
+	cmd = gitCommand(ctx, "-C", repoPath, "worktree", "prune")
 	if err := cmd.Run(); err != nil {
 		logger.Warn("git worktree prune 失败: %v", err)
 	} else {
@@ -143,9 +186,12 @@ func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktr
 	}
 
 	// 再删除对应的分支（仅在与目录 slug 一致时）
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if branchToDelete != "" {
 		logger.Info("删除分支: repo=%s, branch=%s", repoPath, branchToDelete)
-		cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "branch", "-D", branchToDelete)
+		cmd = gitCommand(ctx, "-C", repoPath, "branch", "-D", branchToDelete)
 		out, err = cmd.CombinedOutput()
 		if err != nil {
 			logger.Warn("删除分支失败（可能不存在）: branch=%s, error=%s", branchToDelete, string(out))
@@ -160,7 +206,7 @@ func (g *GitProxy) RemoveWorktreeAndBranch(ctx context.Context, repoPath, worktr
 
 // ListWorktrees 列出所有工作树
 func (g *GitProxy) ListWorktrees(ctx context.Context, repoPath string) ([]WorktreeInfo, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "list", "--porcelain")
+	cmd := gitCommand(ctx, "-C", repoPath, "worktree", "list", "--porcelain", "-z")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("[git worktree list] failed: %w, output: %s", errors.ErrGitExec, string(out))
@@ -171,10 +217,17 @@ func (g *GitProxy) ListWorktrees(ctx context.Context, repoPath string) ([]Worktr
 
 // Fetch 从远程获取最新
 func (g *GitProxy) Fetch(ctx context.Context, repoPath string) error {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "fetch", "--all")
-	out, err := cmd.CombinedOutput()
+	return g.fetch(ctx, repoPath, "--all")
+}
+
+func (g *GitProxy) fetch(ctx context.Context, repoPath, remote string) error {
+	stage := "拉取 " + remote
+	if remote == "--all" {
+		stage = "拉取远端"
+	}
+	out, err := runProgress(ctx, stage, "-C", repoPath, "fetch", "--progress", remote)
 	if err != nil {
-		return fmt.Errorf("[git fetch] failed to fetch in %s: %w: %w, output: %s", repoPath, errors.ErrGitExec, commandCause(ctx, err), string(out))
+		return fmt.Errorf("[git fetch] %s: %w: %w, output: %s", repoPath, errors.ErrGitExec, commandCause(ctx, err), out)
 	}
 	return nil
 }
@@ -182,30 +235,29 @@ func (g *GitProxy) Fetch(ctx context.Context, repoPath string) error {
 // Rebase 在当前路径下执行 fetch 后 rebase origin/<当前分支>
 func (g *GitProxy) Rebase(ctx context.Context, path string) error {
 	// fetch 在 path 对应的仓库
-	if err := g.Fetch(ctx, path); err != nil {
+	if err := g.fetch(ctx, path, "origin"); err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD")
+	cmd := gitCommand(ctx, "-C", path, "rev-parse", "--abbrev-ref", "HEAD")
 	branchOut, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("[git rev-parse] failed to get branch in %s: %w", path, err)
+		return fmt.Errorf("[git rev-parse] failed to get branch in %s: %w", path, commandCause(ctx, err))
 	}
 	branch := strings.TrimSpace(string(branchOut))
 	if branch == "" || branch == "HEAD" {
 		return fmt.Errorf("[rebase] detached HEAD in %s", path)
 	}
-	rebaseCmd := exec.CommandContext(ctx, "git", "-C", path, "rebase", "origin/"+branch)
-	out, err := rebaseCmd.CombinedOutput()
+	out, err := runProgress(ctx, "rebase", "-C", path, "rebase", "origin/"+branch)
 	if err != nil {
-		return fmt.Errorf("[git rebase] failed in %s: %w, output: %s", path, errors.ErrGitExec, string(out))
+		return fmt.Errorf("[git rebase] failed in %s: %w, output: %s: %w", path, errors.ErrGitExec, string(out), commandCause(ctx, err))
 	}
 	return nil
 }
 
 // FetchAndSwitchBranch fetch 并切换到指定分支
 func (g *GitProxy) FetchAndSwitchBranch(ctx context.Context, repoPath, branch string) error {
-	// fetch 所有远程
-	if err := g.Fetch(ctx, repoPath); err != nil {
+	// 更新仅依赖 origin，避免访问无关远端。
+	if err := g.fetch(ctx, repoPath, "origin"); err != nil {
 		return err
 	}
 
@@ -213,26 +265,23 @@ func (g *GitProxy) FetchAndSwitchBranch(ctx context.Context, repoPath, branch st
 	exists := g.BranchExists(ctx, repoPath, branch)
 	if !exists {
 		// 本地不存在，尝试 checkout 到远程分支
-		cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "checkout", "-b", branch, "origin/"+branch)
-		out, err := cmd.CombinedOutput()
+		out, err := runProgress(ctx, "切换分支", "-C", repoPath, "checkout", "-b", branch, "origin/"+branch)
 		if err != nil {
-			return fmt.Errorf("[git checkout] failed to create branch %s in %s: %w, output: %s", branch, repoPath, errors.ErrGitExec, string(out))
+			return fmt.Errorf("[git checkout] failed to create branch %s in %s: %w: %w, output: %s", branch, repoPath, errors.ErrGitExec, commandCause(ctx, err), out)
 		}
 		return nil
 	}
 
 	// 本地已存在，直接 checkout
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "checkout", branch)
-	out, err := cmd.CombinedOutput()
+	out, err := runProgress(ctx, "切换分支", "-C", repoPath, "checkout", branch)
 	if err != nil {
-		return fmt.Errorf("[git checkout] failed to switch to branch %s in %s: %w, output: %s", branch, repoPath, errors.ErrGitExec, string(out))
+		return fmt.Errorf("[git checkout] failed to switch to branch %s in %s: %w: %w, output: %s", branch, repoPath, errors.ErrGitExec, commandCause(ctx, err), out)
 	}
 
 	// rebase 到远程分支
-	rebaseCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rebase", "origin/"+branch)
-	rebaseOut, err := rebaseCmd.CombinedOutput()
+	rebaseOut, err := runProgress(ctx, "rebase", "-C", repoPath, "rebase", "origin/"+branch)
 	if err != nil {
-		return fmt.Errorf("[git rebase] failed in %s: %w, output: %s", repoPath, errors.ErrGitExec, string(rebaseOut))
+		return fmt.Errorf("[git rebase] failed in %s: %w: %w, output: %s", repoPath, errors.ErrGitExec, commandCause(ctx, err), rebaseOut)
 	}
 
 	return nil
@@ -240,13 +289,13 @@ func (g *GitProxy) FetchAndSwitchBranch(ctx context.Context, repoPath, branch st
 
 // BranchExists 检查分支是否存在
 func (g *GitProxy) BranchExists(ctx context.Context, repoPath, branch string) bool {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "--verify", branch)
+	cmd := gitCommand(ctx, "-C", repoPath, "rev-parse", "--verify", branch)
 	return cmd.Run() == nil
 }
 
 // RemoteBranchExists 检查远端仓库是否存在指定分支
 func (g *GitProxy) RemoteBranchExists(ctx context.Context, repoURL, branch string) bool {
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", repoURL, "refs/heads/"+branch)
+	cmd := gitCommand(ctx, "ls-remote", "--heads", repoURL, "refs/heads/"+branch)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return false
@@ -264,14 +313,14 @@ func (g *GitProxy) CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath,
 	if err := g.ensureOriginTracksBranch(ctx, repoPath, branch, refspec); err != nil {
 		return err
 	}
-	fetchCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "fetch", "origin", refspec)
+	fetchCmd := gitCommand(ctx, "-C", repoPath, "fetch", "origin", refspec)
 	fetchOut, err := fetchCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("[git fetch] failed to fetch remote branch %s in %s: %w: %w, output: %s", branch, repoPath, errors.ErrGitExec, commandCause(ctx, err), string(fetchOut))
 	}
 
 	// worktree 需要本地分支，否则会处于 detached HEAD，无法正常执行后续 update。
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "add", "--track", "-b", branch, worktreePath, remoteBranch)
+	cmd := gitCommand(ctx, "-C", repoPath, "worktree", "add", "--track", "-b", branch, worktreePath, remoteBranch)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("[git worktree add] failed to create worktree from remote branch %s at %s: %w: %w, output: %s", branch, worktreePath, errors.ErrGitExec, commandCause(ctx, err), string(out))
@@ -281,14 +330,14 @@ func (g *GitProxy) CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath,
 
 // ensureOriginTracksBranch 确保 origin 的 fetch refspec 能将目标分支识别为可跟踪的远程分支。
 func (g *GitProxy) ensureOriginTracksBranch(ctx context.Context, repoPath, branch, refspec string) error {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "remote", "set-branches", "--add", "origin", branch)
+	cmd := gitCommand(ctx, "-C", repoPath, "remote", "set-branches", "--add", "origin", branch)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("[git remote set-branches] failed to track remote branch %s in %s: %w: %w, output: %s", branch, repoPath, errors.ErrGitExec, commandCause(ctx, err), string(out))
 	}
 
 	// set-branches 由 Git 维护 remote.origin.fetch；refspec 仅用于校验命令结果是目标映射。
-	verifyCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "config", "--get-all", "--fixed-value", "remote.origin.fetch", "+"+refspec)
+	verifyCmd := gitCommand(ctx, "-C", repoPath, "config", "--get-all", "--fixed-value", "remote.origin.fetch", "+"+refspec)
 	verifyOut, err := verifyCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("[git config] failed to verify remote branch %s in %s: %w: %w, output: %s", branch, repoPath, errors.ErrGitExec, commandCause(ctx, err), string(verifyOut))
@@ -348,7 +397,7 @@ func (g *GitProxy) GetBranchPushStatus(ctx context.Context, repoPath, branch str
 // resolveBranchRemoteRef 优先使用 upstream，否则回退到 origin/<branch>。
 func (g *GitProxy) resolveBranchRemoteRef(ctx context.Context, repoPath, branch string) (string, bool, error) {
 	upstreamArg := branch + "@{upstream}"
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "--abbrev-ref", upstreamArg)
+	cmd := gitCommand(ctx, "-C", repoPath, "rev-parse", "--abbrev-ref", upstreamArg)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		remoteRef := strings.TrimSpace(string(out))
@@ -359,7 +408,7 @@ func (g *GitProxy) resolveBranchRemoteRef(ctx context.Context, repoPath, branch 
 
 	fallbackRemoteRef := "origin/" + branch
 	verifyRef := "refs/remotes/" + fallbackRemoteRef
-	cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "--verify", "--quiet", verifyRef)
+	cmd = gitCommand(ctx, "-C", repoPath, "rev-parse", "--verify", "--quiet", verifyRef)
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		return "", false, nil
@@ -373,7 +422,7 @@ func (g *GitProxy) resolveBranchRemoteRef(ctx context.Context, repoPath, branch 
 // countBranchAhead 返回 local branch 相对 remoteRef 的领先提交数。
 func (g *GitProxy) countBranchAhead(ctx context.Context, repoPath, remoteRef, branch string) (int, error) {
 	revisionRange := remoteRef + ".." + branch
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-list", "--count", revisionRange)
+	cmd := gitCommand(ctx, "-C", repoPath, "rev-list", "--count", revisionRange)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("[git rev-list] failed to count ahead commits for %s in %s: %w, output: %s", branch, repoPath, errors.ErrGitExec, string(out))
@@ -400,66 +449,72 @@ func (g *GitProxy) CheckBranchWorktreeStatus(ctx context.Context, repoPath, bran
 	return false, nil
 }
 
-// parseStatus 解析 git status --porcelain 输出
-func parseStatus(ctx context.Context, output, path string) (Status, error) {
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	files := make([]FileStatus, 0, len(lines))
-	isDirty := false
-
-	for _, line := range lines {
-		if len(line) < 2 {
+// parseStatus 读取 porcelain v2 的 NUL 分隔记录，保留空格、换行及重命名路径。
+func parseStatus(output string) Status {
+	result := Status{}
+	records := strings.Split(output, "\x00")
+	for i := 0; i < len(records); i++ {
+		record := records[i]
+		if branch, ok := strings.CutPrefix(record, "# branch.head "); ok {
+			result.Branch = branch
+			if branch == "(detached)" {
+				result.Branch = "HEAD"
+			}
 			continue
 		}
-		status := rune(line[0])
-		name := strings.TrimSpace(line[3:])
-		if name == "" {
-			name = line[2:]
+		if len(record) < 2 {
+			continue
 		}
-
-		// 非空状态表示有变更
-		if status != ' ' && status != '?' {
-			isDirty = true
+		var file FileStatus
+		switch record[0] {
+		case '?':
+			file = FileStatus{Name: record[2:], Status: '?'}
+		case '1', '2', 'u':
+			fieldsCount := 9
+			if record[0] == '2' {
+				fieldsCount = 10
+			} else if record[0] == 'u' {
+				fieldsCount = 11
+			}
+			fields := strings.SplitN(record, " ", fieldsCount)
+			if len(fields) != fieldsCount || len(fields[1]) < 2 {
+				continue
+			}
+			file = FileStatus{Name: fields[fieldsCount-1], Status: rune(fields[1][0])}
+			if file.Status == '.' {
+				file.Status = rune(fields[1][1])
+			}
+			if record[0] == '2' {
+				i++
+			}
+		default:
+			continue
 		}
-		// ?? 表示未跟踪文件，也是脏
-		if line[0] == '?' && line[1] == '?' {
-			isDirty = true
-		}
-
-		files = append(files, FileStatus{
-			Name:   name,
-			Status: status,
-		})
+		result.IsDirty = true
+		result.Files = append(result.Files, file)
 	}
-
-	// 获取当前分支
-	branch := ""
-	cmd := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD")
-	out, err := cmd.Output()
-	if err == nil {
-		branch = strings.TrimSpace(string(out))
-	}
-
-	return Status{
-		IsDirty: isDirty,
-		Branch:  branch,
-		Files:   files,
-	}, nil
+	return result
 }
 
 // parseWorktreeList 解析 git worktree list 输出
 func parseWorktreeList(output string) ([]WorktreeInfo, error) {
 	var worktrees []WorktreeInfo
-	lines := strings.Split(strings.TrimSpace(output), "\n")
+	separator := "\n"
+	if strings.Contains(output, "\x00") {
+		separator = "\x00"
+	}
+	lines := strings.Split(output, separator)
 
 	var current WorktreeInfo
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
 		if path, ok := strings.CutPrefix(line, "worktree "); ok {
 			current.Path = path
 		} else if strings.HasPrefix(line, "HEAD ") {
 			// HEAD 行不需要处理
 		} else if branch, ok := strings.CutPrefix(line, "branch refs/heads/"); ok {
 			current.Branch = branch
+		} else if line == "detached" {
+			current.Branch = "HEAD"
 		} else if line == "" {
 			// 空行表示一个 worktree 结束
 			if current.Path != "" {
@@ -479,7 +534,7 @@ func parseWorktreeList(output string) ([]WorktreeInfo, error) {
 
 // ExecGit 执行 git 命令并返回输出
 func ExecGit(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := gitCommand(ctx, args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}

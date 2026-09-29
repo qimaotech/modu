@@ -345,8 +345,8 @@ func TestModuleSelector_View_NonEmpty(t *testing.T) {
 func TestApp_View_Loading(t *testing.T) {
 	app := &App{state: "loading"}
 	view := app.View()
-	if view != "Loading..." {
-		t.Errorf("View() = %q, 期望 Loading...", view)
+	if !strings.Contains(view, "加载") {
+		t.Errorf("View() = %q, 期望加载提示", view)
 	}
 }
 
@@ -406,9 +406,10 @@ func TestApp_DeleteFlow_UnpushedConfirmThenDelete(t *testing.T) {
 	app, fake := newDeleteRiskTestApp(t)
 
 	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
-	if cmd != nil {
-		t.Fatal("进入未推送确认不应立即返回删除命令")
+	if cmd == nil {
+		t.Fatal("检查应在后台执行")
 	}
+	completeOperation(t, app, cmd)
 	if app.state != "confirm_unpushed" {
 		t.Fatalf("state = %q, want confirm_unpushed", app.state)
 	}
@@ -423,6 +424,7 @@ func TestApp_DeleteFlow_UnpushedConfirmThenDelete(t *testing.T) {
 	if app.state != "loading" {
 		t.Fatalf("state = %q, want loading", app.state)
 	}
+	completeOperation(t, app, cmd)
 	if fake.removeCalls != 2 {
 		t.Fatalf("期望删除模块和主项目，removeCalls=%d", fake.removeCalls)
 	}
@@ -873,9 +875,10 @@ func TestApp_CreateInput_ValidNameInitializesSelection(t *testing.T) {
 	}
 
 	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd != nil {
-		t.Error("初始化选择不应返回命令")
+	if cmd == nil {
+		t.Fatal("远端查询应返回后台命令")
 	}
+	completeOperation(t, app, cmd)
 	if app.state != "create_modules" {
 		t.Fatalf("有效名称后 state = %q，期望 create_modules", app.state)
 	}
@@ -921,7 +924,7 @@ func TestApp_CreateModules_ConfirmCreatesSelectedModules(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("确认选择应返回创建命令")
 	}
-	_ = cmd()
+	completeOperation(t, app, cmd)
 
 	if len(fake.createWorktreeCalls) != 2 {
 		t.Fatalf("期望创建主项目和 m1 两个 worktree，got %d: %v", len(fake.createWorktreeCalls), fake.createWorktreeCalls)
@@ -943,7 +946,7 @@ func TestApp_CreateModules_ConfirmCreatesMainOnly(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("确认零模块选择应返回创建命令")
 	}
-	_ = cmd()
+	completeOperation(t, app, cmd)
 
 	if len(fake.createWorktreeCalls) != 1 {
 		t.Fatalf("期望仅创建主项目 worktree，got %d: %v", len(fake.createWorktreeCalls), fake.createWorktreeCalls)
@@ -961,8 +964,8 @@ func TestApp_CreateFeatureDone_SuccessReloadsList(t *testing.T) {
 	}
 
 	_, cmd := app.Update(createFeatureDoneMsg{feature: "feat-a"})
-	if app.state != "loading" {
-		t.Fatalf("成功后 state = %q，期望 loading 以刷新列表", app.state)
+	if app.state != "list" {
+		t.Fatalf("成功后列表应可交互，state=%s", app.state)
 	}
 	if app.message != "已创建 feature: feat-a" {
 		t.Fatalf("成功消息 = %q", app.message)
@@ -1084,7 +1087,7 @@ type uiFakeGitClient struct {
 	removeCalls         int
 }
 
-func (f *uiFakeGitClient) Clone(ctx context.Context, url, path string) error {
+func (f *uiFakeGitClient) Clone(ctx context.Context, url, path string, options gitproxy.CloneOptions) error {
 	return nil
 }
 
@@ -1157,4 +1160,21 @@ func (f *uiFakeGitClient) GetBranchPushStatus(ctx context.Context, repoPath, bra
 		}
 	}
 	return gitproxy.BranchPushStatus{Branch: branch, RemoteRef: "origin/" + branch, IsPushed: true}, nil
+}
+
+// completeOperation 模拟 Bubble Tea 投递后台结果，不运行周期 Tick 或后续状态刷新。
+func completeOperation(t *testing.T, app *App, cmd tea.Cmd) tea.Cmd {
+	t.Helper()
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatal("expected background operation and tick")
+	}
+	for _, command := range batch {
+		if result, ok := command().(operationResultMsg); ok {
+			_, next := app.Update(result)
+			return next
+		}
+	}
+	t.Fatal("missing operation result")
+	return nil
 }

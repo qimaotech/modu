@@ -44,3 +44,15 @@ When `-a` flag is used, the workspace information SHALL be displayed before the 
 #### Scenario: Output order with -a flag
 - **WHEN** user runs `modu list -a`
 - **THEN** workspace section appears first, followed by Features section
+
+### Requirement: 按需检查状态
+
+默认文本列表（包括 -a）SHALL 每个源仓库读取一次 worktree 注册信息，不执行文件状态扫描。
+
+#### Scenario: 大量 feature
+- **WHEN** 用户执行默认文本 list
+- **THEN** 元数据 Git 调用次数随源仓库数量增长，不随 feature 数量成倍增长
+
+#### Scenario: 请求文件状态
+- **WHEN** 用户使用 --status、status 命令或 JSON 列表
+- **THEN** 每个 worktree 通过一次 porcelain v2 调用读取分支和脏状态，并使用全局有界并发

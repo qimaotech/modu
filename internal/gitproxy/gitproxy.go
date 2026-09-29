@@ -7,7 +7,7 @@ import (
 // GitClient Git 操作接口
 type GitClient interface {
 	// Clone 克隆仓库到指定路径
-	Clone(ctx context.Context, url, path string) error
+	Clone(ctx context.Context, url, path string, options CloneOptions) error
 	// CreateWorktree 创建工作树
 	CreateWorktree(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error
 	// GetStatus 获取目录状态
@@ -36,6 +36,11 @@ type GitClient interface {
 	CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath, branch, worktreePath string) error
 	// GetBranchPushStatus 检查本地分支是否已完整推送到远端分支
 	GetBranchPushStatus(ctx context.Context, repoPath, branch string) (BranchPushStatus, error)
+}
+
+// CloneOptions 控制可选的历史对象过滤，空值保持完整克隆。
+type CloneOptions struct {
+	Filter string
 }
 
 // Status Git 状态

@@ -3,11 +3,14 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -16,6 +19,7 @@ import (
 	errs "github.com/qimaotech/modu/internal/errors"
 	"github.com/qimaotech/modu/internal/gitproxy"
 	"github.com/qimaotech/modu/internal/logger"
+	"github.com/qimaotech/modu/internal/progress"
 )
 
 // Engine 核心业务引擎
@@ -42,6 +46,14 @@ type UnpushedBranch struct {
 	AheadCount   int    `json:"aheadCount,omitempty"`
 	Reason       string `json:"reason,omitempty"`
 }
+
+// UnpushedBranchesError 携带交互层展示确认所需的明细，避免调用方重复远端检查。
+type UnpushedBranchesError struct {
+	Branches []UnpushedBranch
+}
+
+func (err *UnpushedBranchesError) Error() string { return "存在未推送的本地分支" }
+func (err *UnpushedBranchesError) Unwrap() error { return errs.ErrUnpushedBranch }
 
 // DeleteOptions 控制 feature 删除中的危险操作是否已被外层确认。
 type DeleteOptions struct {
@@ -87,25 +99,45 @@ func FeatureToDirName(feature string) string {
 
 // Init 并发克隆所有配置的仓库
 func (e *Engine) Init(ctx context.Context) error {
-	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(e.Config.Concurrency)
+	return e.InitWithOptions(ctx, gitproxy.CloneOptions{})
+}
 
+func (e *Engine) InitWithOptions(ctx context.Context, options gitproxy.CloneOptions) error {
+	if options.Filter != "" && options.Filter != "blob:none" {
+		return fmt.Errorf("不支持的 clone filter %q: %w", options.Filter, errs.ErrInvalidOperation)
+	}
+	jobs := make([]repositoryJob, 0, len(e.Config.Modules))
 	for _, module := range e.Config.Modules {
-		module := module
-		g.Go(func() error {
-			path := filepath.Join(e.Config.Workspace, module.Name)
-			// 检查是否已存在
-			if _, err := os.Stat(path); err == nil {
-				return nil // 已存在，跳过
+		path := filepath.Join(e.Config.Workspace, module.Name)
+		_, statErr := os.Stat(path)
+		exists := statErr == nil
+		jobs = append(jobs, repositoryJob{name: module.Name, stage: "克隆", skip: exists, run: func(ctx context.Context) error {
+			if exists {
+				if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
+					return fmt.Errorf("已有目录不是完整仓库 %s: %w", path, err)
+				}
+				if _, err := e.GitProxy.ListWorktrees(ctx, path); err != nil {
+					return fmt.Errorf("已有仓库不可用 %s: %w", path, err)
+				}
+				return nil
 			}
-			return e.GitProxy.Clone(ctx, module.URL, path)
-		})
+			if !os.IsNotExist(statErr) {
+				return statErr
+			}
+			return e.GitProxy.Clone(ctx, module.URL, path, options)
+		}})
 	}
-
-	if err := g.Wait(); err != nil {
-		return fmt.Errorf("failed to init repositories: %w", fmt.Errorf("%w", err))
+	_, failed := e.runRepositories(ctx, jobs)
+	names := make([]string, 0, len(failed))
+	for name := range failed {
+		names = append(names, name)
 	}
-	return nil
+	sort.Strings(names)
+	failures := make([]error, 0, len(names))
+	for _, name := range names {
+		failures = append(failures, fmt.Errorf("%s: %w", name, failed[name]))
+	}
+	return errors.Join(failures...)
 }
 
 // CreateWorktree 并发创建 feature 工作树
@@ -162,7 +194,7 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 
 	// 4. 并发创建其他模块的 worktree。不因单模块失败取消其他模块，以保留真实错误结果。
 	var g errgroup.Group
-	g.SetLimit(e.Config.Concurrency)
+	g.SetLimit(e.concurrency())
 
 	results := make(chan worktreeResult, len(e.Config.Modules))
 
@@ -176,7 +208,7 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 			// 检查模块是否已存在
 			if _, err := os.Stat(worktreePath); err == nil {
 				// 模块已存在，跳过
-				results <- worktreeResult{module: module, path: worktreePath, repoPath: repoPath, err: nil}
+				results <- worktreeResult{module: module, path: worktreePath, repoPath: repoPath, err: nil, skipped: true}
 				return nil
 			}
 
@@ -256,21 +288,27 @@ func (e *Engine) CreateWorktree(ctx context.Context, feature, base string) error
 			}
 		}
 
-		// 回滚：删除已创建的模块 worktree
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancelCleanup()
+		// 回滚仅移除本次创建的 worktree，保留原有环境。
 		for _, r := range resultSlice {
-			if r.err == nil && r.path != "" && r.repoPath != "" {
-				_ = e.GitProxy.RemoveWorktreeAndBranch(ctx, r.repoPath, r.path, dirName)
-				_ = os.RemoveAll(r.path)
+			if r.err == nil && !r.skipped && r.path != "" && r.repoPath != "" {
+				if removeErr := e.GitProxy.RemoveWorktreeAndBranch(cleanupCtx, r.repoPath, r.path, dirName); removeErr != nil {
+					logger.Warn("回滚 worktree 失败: %v", removeErr)
+				}
 			}
 		}
 		// 删除主项目 worktree（feature 目录）
-		_ = e.GitProxy.RemoveWorktreeAndBranch(ctx, e.Config.Workspace, mainProjectPath, dirName)
-		_ = os.RemoveAll(mainProjectPath)
+		if !featureExists {
+			if removeErr := e.GitProxy.RemoveWorktreeAndBranch(cleanupCtx, e.Config.Workspace, mainProjectPath, dirName); removeErr != nil {
+				logger.Warn("回滚主项目失败: %v", removeErr)
+			}
+		}
 
 		if len(errMsgs) > 0 {
-			return fmt.Errorf("create worktree failed: %s: %w", strings.Join(errMsgs, "; "), errs.ErrPartialFailure)
+			return fmt.Errorf("create worktree failed: %s: %w", strings.Join(errMsgs, "; "), errors.Join(errs.ErrPartialFailure, err))
 		}
-		return fmt.Errorf("create worktree failed: %w", errs.ErrPartialFailure)
+		return fmt.Errorf("create worktree failed: %w", errors.Join(errs.ErrPartialFailure, err))
 	}
 	close(results)
 
@@ -532,6 +570,9 @@ func (e *Engine) DeleteWorktree(ctx context.Context, feature string, force bool)
 
 // DeleteWorktreeWithOptions 删除 feature 工作树，并允许外层传入已确认的危险操作选项。
 func (e *Engine) DeleteWorktreeWithOptions(ctx context.Context, feature string, force bool, options DeleteOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	logger.Info("开始删除 feature: %s, force: %v", feature, force)
 
 	// 将 feature 名转换为目录名（feature/hello → feature-hello）
@@ -555,6 +596,9 @@ func (e *Engine) DeleteWorktreeWithOptions(ctx context.Context, feature string, 
 		}
 		configuredNames := e.configuredModuleNames()
 		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if !entry.IsDir() || !configuredNames[entry.Name()] {
 				continue
 			}
@@ -580,7 +624,7 @@ func (e *Engine) DeleteWorktreeWithOptions(ctx context.Context, feature string, 
 			return err
 		}
 		if len(risks) > 0 {
-			return fmt.Errorf("cannot delete: unpushed branches detected: %w", errs.ErrUnpushedBranch)
+			return &UnpushedBranchesError{Branches: risks}
 		}
 	}
 
@@ -592,6 +636,9 @@ func (e *Engine) DeleteWorktreeWithOptions(ctx context.Context, feature string, 
 
 	// 删除所有存在的模块的 worktree
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !entry.IsDir() || entry.Name() == ".git" {
 			continue
 		}
@@ -633,6 +680,9 @@ func (e *Engine) DeleteWorktreeWithOptions(ctx context.Context, feature string, 
 		logger.Info("删除模块 worktree 成功: %s", moduleName)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// 删除主项目的 worktree（主项目直接放在 feature 目录下）
 	mainProjectPath := featurePath
 
@@ -649,6 +699,9 @@ func (e *Engine) DeleteWorktreeWithOptions(ctx context.Context, feature string, 
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// 删除 feature 目录
 	if err := os.RemoveAll(featurePath); err != nil {
 		logger.Error("删除 feature 目录失败: %s, error: %v", feature, err)
@@ -709,293 +762,45 @@ func (e *Engine) GetMainProjectModules(ctx context.Context) (*MainProjectStatus,
 }
 
 // UpdateMainProject 并发对主项目和所有模块执行 fetch + rebase，返回成功数量和失败 map[name]error
-func (e *Engine) UpdateMainProject(ctx context.Context) (success int, failed map[string]error) {
-	failed = make(map[string]error)
-	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(e.Config.Concurrency)
-
-	mainName := filepath.Base(e.Config.Workspace)
-	g.Go(func() error {
-		// 主项目切换到 default-base 分支
-		if err := e.GitProxy.FetchAndSwitchBranch(ctx, e.Config.Workspace, e.Config.DefaultBase); err != nil {
-			failed[mainName] = err
-		}
-		return nil
-	})
-
+func (e *Engine) UpdateMainProject(ctx context.Context) (int, map[string]error) {
+	jobs := []repositoryJob{{name: e.mainRepositoryName(), stage: "拉取 origin", run: func(ctx context.Context) error {
+		return e.GitProxy.FetchAndSwitchBranch(ctx, e.Config.Workspace, e.Config.DefaultBase)
+	}}}
 	for _, module := range e.Config.Modules {
-		module := module
 		repoPath := filepath.Join(e.Config.Workspace, module.Name)
 		if _, err := os.Stat(repoPath); os.IsNotExist(err) {
 			continue
 		}
-		// 使用模块的 base-branch（如果有）或全局 default-base
-		baseBranch := module.BaseBranch
-		if baseBranch == "" {
-			baseBranch = e.Config.DefaultBase
+		branch := module.BaseBranch
+		if branch == "" {
+			branch = e.Config.DefaultBase
 		}
-		g.Go(func() error {
-			if err := e.GitProxy.FetchAndSwitchBranch(ctx, repoPath, baseBranch); err != nil {
-				failed[module.Name] = err
-			}
-			return nil
-		})
+		jobs = append(jobs, repositoryJob{name: module.Name, stage: "拉取 origin", run: func(ctx context.Context) error {
+			return e.GitProxy.FetchAndSwitchBranch(ctx, repoPath, branch)
+		}})
 	}
-
-	_ = g.Wait()
-
-	if _, ok := failed[mainName]; !ok {
-		success++
-	}
-	for _, module := range e.Config.Modules {
-		repoPath := filepath.Join(e.Config.Workspace, module.Name)
-		if _, err := os.Stat(repoPath); err == nil {
-			if _, hasErr := failed[module.Name]; !hasErr {
-				success++
-			}
-		}
-	}
-	return success, failed
+	return e.runRepositories(ctx, jobs)
 }
 
-// UpdateWorktree 对指定 feature 的 worktree（主项目 + 该目录下存在的模块）并发执行 fetch + rebase
-func (e *Engine) UpdateWorktree(ctx context.Context, feature string) (success int, failed map[string]error) {
-	failed = make(map[string]error)
-	// 将 feature 名转换为目录名（feature/hello → feature-hello）
-	dirName := featureToDirName(feature)
-	featurePath := filepath.Join(e.Config.WorktreeRoot, dirName)
-	if _, err := os.Stat(featurePath); os.IsNotExist(err) {
-		return 0, failed
+// UpdateWorktree 更新指定 feature 内存在的仓库，保持当前分支。
+func (e *Engine) UpdateWorktree(ctx context.Context, feature string) (int, map[string]error) {
+	featurePath := filepath.Join(e.Config.WorktreeRoot, featureToDirName(feature))
+	if _, err := os.Stat(featurePath); err != nil {
+		return 0, map[string]error{feature: fmt.Errorf("feature %s: %w", feature, err)}
 	}
-	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(e.Config.Concurrency)
-
-	mainName := filepath.Base(e.Config.Workspace)
-	g.Go(func() error {
-		if err := e.GitProxy.Rebase(ctx, featurePath); err != nil {
-			failed[mainName] = err
-		}
-		return nil
-	})
-
+	jobs := []repositoryJob{{name: e.mainRepositoryName(), stage: "拉取 origin", run: func(ctx context.Context) error {
+		return e.GitProxy.Rebase(ctx, featurePath)
+	}}}
 	for _, module := range e.Config.Modules {
-		module := module
 		modulePath := filepath.Join(featurePath, module.Name)
 		if _, err := os.Stat(modulePath); os.IsNotExist(err) {
 			continue
 		}
-		g.Go(func() error {
-			if err := e.GitProxy.Rebase(ctx, modulePath); err != nil {
-				failed[module.Name] = err
-			}
-			return nil
-		})
+		jobs = append(jobs, repositoryJob{name: module.Name, stage: "拉取 origin", run: func(ctx context.Context) error {
+			return e.GitProxy.Rebase(ctx, modulePath)
+		}})
 	}
-
-	_ = g.Wait()
-
-	if _, ok := failed[mainName]; !ok {
-		success++
-	}
-	for _, module := range e.Config.Modules {
-		modulePath := filepath.Join(featurePath, module.Name)
-		if _, err := os.Stat(modulePath); err == nil {
-			if _, hasErr := failed[module.Name]; !hasErr {
-				success++
-			}
-		}
-	}
-	return success, failed
-}
-
-// ListWorktrees 列出所有 worktree
-func (e *Engine) ListWorktrees(ctx context.Context) ([]core.WorktreeEnv, error) {
-	// 扫描 worktree-root 目录，如果不存在则创建
-	if err := os.MkdirAll(e.Config.WorktreeRoot, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create worktree root: %w", err)
-	}
-
-	entries, err := os.ReadDir(e.Config.WorktreeRoot)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read worktree root: %w", err)
-	}
-
-	// 获取主项目名称
-	mainProjectName := filepath.Base(e.Config.Workspace)
-
-	envs := make([]core.WorktreeEnv, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		// 跳过以 . 开头的隐藏目录
-		if strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-
-		// 直接使用目录名作为 feature 名
-		feature := entry.Name()
-		featurePath := filepath.Join(e.Config.WorktreeRoot, entry.Name())
-
-		env := core.WorktreeEnv{
-			Name:        feature,
-			DirName:     entry.Name(),
-			Base:        "", // TODO: 需要从 git 获取
-			MainProject: nil,
-			Modules:     []core.ModuleStatus{},
-		}
-
-		// 列出该 feature 下的所有子目录
-		moduleEntries, err := os.ReadDir(featurePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read feature directory %s: %w", featurePath, err)
-		}
-
-		// 1. 检查 feature 目录本身是否是主项目（新结构）
-		// feature 目录 = 主项目，feature 下的子目录 = 模块
-		status, err := e.GitProxy.GetStatus(ctx, featurePath)
-		if err == nil {
-			env.MainProject = &core.ModuleStatus{
-				Name:    mainProjectName,
-				Path:    featurePath,
-				IsDirty: status.IsDirty,
-				Branch:  status.Branch,
-			}
-			env.Branch = status.Branch
-		} else {
-			// 2. 检查是否有 workspace 子目录（兼容旧结构）
-			for _, me := range moduleEntries {
-				if me.Name() == mainProjectName {
-					modulePath := filepath.Join(featurePath, me.Name())
-					status, err := e.GitProxy.GetStatus(ctx, modulePath)
-					if err == nil {
-						env.MainProject = &core.ModuleStatus{
-							Name:    mainProjectName,
-							Path:    modulePath,
-							IsDirty: status.IsDirty,
-							Branch:  status.Branch,
-						}
-						env.Branch = status.Branch
-					}
-					break
-				}
-			}
-		}
-
-		// 只把配置中的模块加入列表，避免 .claude、openspec 等非模块目录被当作模块展示
-		configuredNames := e.configuredModuleNames()
-		for _, me := range moduleEntries {
-			if !me.IsDir() {
-				continue
-			}
-			modulePath := filepath.Join(featurePath, me.Name())
-
-			// 跳过主项目目录（已处理）
-			if me.Name() == mainProjectName {
-				continue
-			}
-			if !configuredNames[me.Name()] {
-				continue
-			}
-
-			// 普通模块
-			status, err := e.GitProxy.GetStatus(ctx, modulePath)
-			if err != nil {
-				env.Modules = append(env.Modules, core.ModuleStatus{
-					Name:  me.Name(),
-					Path:  modulePath,
-					Error: err,
-				})
-				continue
-			}
-			env.Modules = append(env.Modules, core.ModuleStatus{
-				Name:    me.Name(),
-				Path:    modulePath,
-				IsDirty: status.IsDirty,
-				Branch:  status.Branch,
-			})
-		}
-
-		// 跳过没有主项目的目录（无效的 feature）
-		if env.MainProject == nil {
-			continue
-		}
-
-		envs = append(envs, env)
-	}
-
-	return envs, nil
-}
-
-// GetWorktreeInfo 获取单个 feature 的详情
-func (e *Engine) GetWorktreeInfo(ctx context.Context, feature string) (*core.WorktreeEnv, error) {
-	// 将 feature 名转换为目录名（feature/hello → feature-hello）
-	dirName := featureToDirName(feature)
-	featurePath := filepath.Join(e.Config.WorktreeRoot, dirName)
-
-	if _, err := os.Stat(featurePath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("feature %s not found: %w", feature, errs.ErrFeatureNotFound)
-	}
-
-	env := &core.WorktreeEnv{
-		Name:        feature,
-		DirName:     dirName,
-		MainProject: nil,
-		Modules:     []core.ModuleStatus{},
-	}
-
-	// 获取主项目名称
-	mainProjectName := filepath.Base(e.Config.Workspace)
-
-	// 检查 feature 目录本身是否是主项目
-	status, err := e.GitProxy.GetStatus(ctx, featurePath)
-	if err == nil {
-		env.MainProject = &core.ModuleStatus{
-			Name:    mainProjectName,
-			Path:    featurePath,
-			IsDirty: status.IsDirty,
-			Branch:  status.Branch,
-		}
-		env.Branch = status.Branch
-	}
-
-	// 列出所有模块（子目录）
-	entries, err := os.ReadDir(featurePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read feature directory %s: %w", featurePath, err)
-	}
-	configuredNames := e.configuredModuleNames()
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		// 跳过主项目目录（兼容旧结构）
-		if entry.Name() == mainProjectName {
-			continue
-		}
-		if !configuredNames[entry.Name()] {
-			continue
-		}
-		modulePath := filepath.Join(featurePath, entry.Name())
-		status, err := e.GitProxy.GetStatus(ctx, modulePath)
-		if err != nil {
-			env.Modules = append(env.Modules, core.ModuleStatus{
-				Name:  entry.Name(),
-				Path:  modulePath,
-				Error: err,
-			})
-			continue
-		}
-		env.Modules = append(env.Modules, core.ModuleStatus{
-			Name:    entry.Name(),
-			Path:    modulePath,
-			IsDirty: status.IsDirty,
-			Branch:  status.Branch,
-		})
-	}
-
-	return env, nil
+	return e.runRepositories(ctx, jobs)
 }
 
 // GetModulesWithRemoteBranch 并发查询所有子模块的远端是否存在指定分支
@@ -1003,13 +808,16 @@ func (e *Engine) GetModulesWithRemoteBranch(ctx context.Context, branch string) 
 	result := make(map[string]bool)
 	var mu sync.Mutex
 
-	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(e.Config.Concurrency)
+	var g errgroup.Group
+	g.SetLimit(e.concurrency())
 
 	for _, module := range e.Config.Modules {
 		module := module
 		g.Go(func() error {
+			ctx := progress.ForModule(ctx, module.Name)
+			progress.Emit(ctx, progress.Event{State: progress.Running, Stage: "查询远端分支"})
 			exists := e.GitProxy.RemoteBranchExists(ctx, module.URL, branch)
+			progress.Finish(ctx, ctx.Err())
 			if exists {
 				mu.Lock()
 				result[module.Name] = true
@@ -1024,6 +832,9 @@ func (e *Engine) GetModulesWithRemoteBranch(ctx context.Context, branch string) 
 		return make(map[string]bool), err
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -1135,6 +946,9 @@ func (e *Engine) RemoveModule(ctx context.Context, feature, moduleName string) e
 
 // RemoveModuleWithOptions 删除单个模块 worktree，并允许外层传入已确认的危险操作选项。
 func (e *Engine) RemoveModuleWithOptions(ctx context.Context, feature, moduleName string, options DeleteOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	logger.Info("为 feature %s 删除模块: %s", feature, moduleName)
 
 	// 将 feature 名转换为目录名（feature/hello → feature-hello）
@@ -1167,6 +981,9 @@ func (e *Engine) RemoveModuleWithOptions(ctx context.Context, feature, moduleNam
 
 	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
 		// 仓库不存在，只删除目录
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		logger.Warn("模块仓库不存在，只删除目录: module=%s", moduleName)
 		if err := os.RemoveAll(modulePath); err != nil {
 			return fmt.Errorf("failed to remove module directory: %w", err)
@@ -1187,6 +1004,9 @@ func (e *Engine) RemoveModuleWithOptions(ctx context.Context, feature, moduleNam
 	}
 
 	// 删除模块目录
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.RemoveAll(modulePath); err != nil {
 		logger.Warn("删除模块目录失败: %s, error=%v", moduleName, err)
 	}
