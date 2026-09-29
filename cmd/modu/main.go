@@ -191,8 +191,8 @@ func main() {
 	// update 命令 - 更新主项目或指定 feature 的 worktree
 	updateCmd := &cobra.Command{
 		Use:   "update [feature]",
-		Short: "更新代码（主项目或指定 feature 的 worktree，fetch + rebase）",
-		Long:  "无参数时更新主项目（workspace + 所有模块）；带 feature 时更新该 feature 的 worktree。",
+		Short: "更新代码（主项目或 feature 的 worktree，fetch + rebase）",
+		Long:  "指定 feature 时更新该 feature 的 worktree；无参数时从当前目录推断 feature（支持模块子目录），其他位置更新主项目（workspace + 所有模块）。",
 		Args:  cobra.MaximumNArgs(1),
 		Run:   runUpdate,
 	}
@@ -744,6 +744,17 @@ func runUpdate(cmd *cobra.Command, args []string) {
 	feature := ""
 	if len(args) > 0 {
 		feature = args[0]
+	} else {
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "获取当前目录失败:", err)
+			os.Exit(1)
+		}
+		feature = inferCurrentFeature(cwd, eng.Config.WorktreeRoot)
+		// workspace 也可能位于 worktree-root 下，主项目及其模块仍使用原有更新流程。
+		if feature != "" && feature == inferCurrentFeature(eng.Config.Workspace, eng.Config.WorktreeRoot) {
+			feature = ""
+		}
 	}
 	display := startProgress("正在更新")
 	ctx := display.Context(cmd.Context())
