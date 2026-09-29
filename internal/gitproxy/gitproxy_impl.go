@@ -306,6 +306,19 @@ func (g *GitProxy) RemoteBranchExists(ctx context.Context, repoURL, branch strin
 
 // CreateWorktreeFromRemoteBranch 从 origin 远程分支创建带跟踪关系的本地 worktree 分支。
 func (g *GitProxy) CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath, branch, worktreePath string) error {
+	if err := g.fetchOriginBranch(ctx, repoPath, branch); err != nil {
+		return err
+	}
+	// worktree 需要本地分支，否则会处于 detached HEAD，无法正常执行后续 update。
+	cmd := gitCommand(ctx, "-C", repoPath, "worktree", "add", "--track", "-b", branch, worktreePath, "origin/"+branch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("[git worktree add] failed to create worktree from remote branch %s at %s: %w: %w, output: %s", branch, worktreePath, errors.ErrGitExec, commandCause(ctx, err), string(out))
+	}
+	return nil
+}
+
+func (g *GitProxy) fetchOriginBranch(ctx context.Context, repoPath, branch string) error {
 	// 显式拉取目标分支，兼容 single-branch clone 或受限的 remote fetch refspec。
 	remoteBranch := "origin/" + branch
 	remoteRef := "refs/remotes/" + remoteBranch
@@ -313,17 +326,9 @@ func (g *GitProxy) CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath,
 	if err := g.ensureOriginTracksBranch(ctx, repoPath, branch, refspec); err != nil {
 		return err
 	}
-	fetchCmd := gitCommand(ctx, "-C", repoPath, "fetch", "origin", refspec)
-	fetchOut, err := fetchCmd.CombinedOutput()
+	fetchOut, err := runProgress(ctx, "拉取需求分支", "-C", repoPath, "fetch", "--progress", "origin", "+"+refspec)
 	if err != nil {
 		return fmt.Errorf("[git fetch] failed to fetch remote branch %s in %s: %w: %w, output: %s", branch, repoPath, errors.ErrGitExec, commandCause(ctx, err), string(fetchOut))
-	}
-
-	// worktree 需要本地分支，否则会处于 detached HEAD，无法正常执行后续 update。
-	cmd := gitCommand(ctx, "-C", repoPath, "worktree", "add", "--track", "-b", branch, worktreePath, remoteBranch)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("[git worktree add] failed to create worktree from remote branch %s at %s: %w: %w, output: %s", branch, worktreePath, errors.ErrGitExec, commandCause(ctx, err), string(out))
 	}
 	return nil
 }

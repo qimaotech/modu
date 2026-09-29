@@ -18,6 +18,7 @@ import (
 
 // MockGitClient 用于测试的 Mock Git 客户端
 type MockGitClient struct {
+	gitproxy.GitClient                   // 未使用的 Git 操作由具体场景提供。
 	CloneFunc                            func(ctx context.Context, url, path string) error
 	CreateWorktreeFunc                   func(ctx context.Context, repoPath, branch, baseBranch, worktreePath string) error
 	CreateWorktreeFromExistingBranchFunc func(ctx context.Context, repoPath, branch, worktreePath string) error

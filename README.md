@@ -7,6 +7,7 @@
 | 命令            | 说明                                       |
 | --------------- | ------------------------------------------ |
 | `create`        | 创建 feature 工作树                        |
+| `checkout`      | 按远程 feature 自动接手主项目及相关模块    |
 | `delete`        | 删除 feature 工作树                        |
 | `default-select` | 设置创建 feature 时默认选中的模块          |
 | `list`          | 列出所有 feature 工作树                    |
@@ -129,6 +130,10 @@ modu create my-feature --base main
 modu create my-feature --modules frontend,backend  # 只创建指定模块
 # 创建时会自动查询远端分支状态，预先选中已有该分支的模块
 
+# 接手研发已推送的需求，自动发现模块并按需克隆
+modu checkout feature/xxx
+modu checkout feature/xxx -o json
+
 # 列出所有 worktree
 modu list
 modu list --status  # 额外检查并显示 clean/dirty 状态
@@ -171,6 +176,39 @@ modu config scan --module "backend=..."       # 扫描并添加模块
 # 查看版本信息
 modu version
 ```
+
+### 测试接手已推送的需求
+
+研发将主项目和相关子项目的同名 feature 分支推送后，测试只需提供分支名，无需传递模块列表或基线。
+
+首次使用时先克隆主项目，在 `.modu.yaml` 中将 `workspace`、`worktree-root` 配置为本机路径，并确保相关子项目已列入 `modules`。随后在该配置所在目录执行：
+
+```bash
+# 自动创建主项目与同名远程分支模块的 worktree，无需先运行 init
+modu checkout feature/order-query
+
+# 查看环境
+modu info feature/order-query
+
+# 研发推送修复后同步代码（fetch + rebase）
+modu update feature/order-query
+```
+
+主项目 worktree 位于 `worktree-root/feature-order-query/`，子项目位于其中各自的模块目录。本地分支跟踪对应仓库的 `origin/feature/order-query`。
+
+`checkout` 的规则：
+
+- 主项目 `origin` 必须存在该分支；不存在就报错，不从默认基线新建。
+- 查询配置内所有模块，仅创建有同名远程分支的模块；忽略默认模块选择、`default-base` 和 `base-branch`。
+- 已初始化模块查询其实际 `origin`；未初始化模块查询配置的 `url`，命中后才克隆。不克隆未命中的模块。
+- 查询失败会报告具体仓库与原因，不将网络或权限错误当作分支不存在；全部查询完成后才创建 worktree。
+- 重复执行只补齐缺失 worktree，保留已有目标 worktree 的本地提交及未提交修改；更新已有代码使用 `update`。
+- 尚未挂载的本地同名分支，仅在提交与远程一致时复用并设置跟踪关系；提交不同、分支被其他 worktree 占用、目录冲突时明确报错。
+- 创建阶段部分失败时保留已完成的仓库，修复问题后可重试；不会强制重置或删除已有工作。
+
+文本和 JSON 输出包含各仓库的状态、路径、分支与提交；进度写入 stderr，`-o json` 的 stdout 是单个 JSON 文档。Ctrl+C 取消时退出码为 130。
+
+`create` 用于研发新建需求，`checkout` 用于接手已推送的需求，`update` 用于同步后续提交。第一版通过配置内仓库的同名远程分支识别相关模块；没有该分支的运行依赖不会被自动纳入。
 
 ### 大型工作区与进度反馈
 

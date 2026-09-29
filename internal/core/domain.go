@@ -1,5 +1,16 @@
 package core
 
+// CheckoutResult 记录接手需求时每个仓库的实际结果。
+type CheckoutResult struct {
+	Module  string `json:"module"`
+	Status  string `json:"status"`
+	Path    string `json:"path,omitempty"`
+	Branch  string `json:"branch,omitempty"`
+	Commit  string `json:"commit,omitempty"`
+	Message string `json:"message,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
 // WorktreeEnv 表示一个 feature 环境，包含多个模块的工作树
 type WorktreeEnv struct {
 	Name        string         `json:"name"`        // Feature 名称

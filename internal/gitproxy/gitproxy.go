@@ -6,6 +6,11 @@ import (
 
 // GitClient Git 操作接口
 type GitClient interface {
+	// QueryRemoteBranch 查询已初始化仓库的 origin；repoPath 为空时使用 repoURL。
+	// 区分远程分支不存在与查询失败。
+	QueryRemoteBranch(ctx context.Context, repoPath, repoURL, branch string) (bool, error)
+	// CheckoutWorktree 接手远程分支，保留已有的目标 worktree。
+	CheckoutWorktree(ctx context.Context, repoPath, branch, worktreePath string) (WorktreeCheckout, error)
 	// Clone 克隆仓库到指定路径
 	Clone(ctx context.Context, url, path string, options CloneOptions) error
 	// CreateWorktree 创建工作树
@@ -36,6 +41,11 @@ type GitClient interface {
 	CreateWorktreeFromRemoteBranch(ctx context.Context, repoPath, branch, worktreePath string) error
 	// GetBranchPushStatus 检查本地分支是否已完整推送到远端分支
 	GetBranchPushStatus(ctx context.Context, repoPath, branch string) (BranchPushStatus, error)
+}
+
+type WorktreeCheckout struct {
+	Commit   string
+	Existing bool
 }
 
 // CloneOptions 控制可选的历史对象过滤，空值保持完整克隆。
