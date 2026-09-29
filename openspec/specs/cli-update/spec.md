@@ -78,3 +78,20 @@ CLI SHALL 支持 `modu update <feature>`，对指定 feature 的 worktree 执行
 #### Scenario: 子模块使用全局 default-base
 - **WHEN** 用户执行 `modu update` 且模块未配置 base-branch
 - **THEN** 该模块执行 fetch + checkout 到 origin/develop + rebase 到 origin/develop（使用全局 default-base）
+
+### Requirement: 有界并发、实时进度与取消
+
+init/update SHALL 按配置的并发数执行仓库操作，安全汇总独立成功与失败结果。更新仅 fetch origin。
+
+#### Scenario: 多个仓库同时失败
+- **WHEN** 并发仓库操作同时报错
+- **THEN** 结果包含每个失败仓库及错误原因，无数据竞争或进程崩溃
+
+#### Scenario: Git 传输较慢
+- **WHEN** 在交互终端执行 init/update
+- **THEN** 命令立即反馈，并动态显示仓库阶段、耗时、完成数和 Git 传输进度
+- **AND** 非 TTY 只输出阶段日志；JSON 模式的仓库操作结果为单个 JSON 文档，进度仅写 stderr
+
+#### Scenario: 取消更新
+- **WHEN** 用户在执行期间按 Ctrl+C
+- **THEN** 中断运行中的 Git，排队任务不再执行，保留已经完成的更新，CLI 退出码为 130

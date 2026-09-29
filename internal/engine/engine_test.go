@@ -37,7 +37,7 @@ type MockGitClient struct {
 
 var _ gitproxy.GitClient = (*MockGitClient)(nil)
 
-func (m *MockGitClient) Clone(ctx context.Context, url, path string) error {
+func (m *MockGitClient) Clone(ctx context.Context, url, path string, options gitproxy.CloneOptions) error {
 	if m.CloneFunc != nil {
 		return m.CloneFunc(ctx, url, path)
 	}

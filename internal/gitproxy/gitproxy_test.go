@@ -6,91 +6,29 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	moduerrors "github.com/qimaotech/modu/internal/errors"
 )
 
-func TestParseStatus(t *testing.T) {
+func TestParseStatus_PorcelainV2(t *testing.T) {
 	tests := []struct {
-		name          string
-		output        string
-		path          string
-		wantIsDirty   bool
-		wantBranch    string
-		wantFileCount int
+		name, output, branch string
+		dirty                bool
+		files                []FileStatus
 	}{
-		{
-			name:          "clean working tree",
-			output:        "",
-			path:          "/test/repo",
-			wantIsDirty:   false,
-			wantBranch:    "main",
-			wantFileCount: 0,
-		},
-		{
-			name:          "modified files",
-			output:        "M  README.md\n M go.mod",
-			path:          "/test/repo",
-			wantIsDirty:   true,
-			wantBranch:    "main",
-			wantFileCount: 2,
-		},
-		{
-			name:          "untracked files",
-			output:        "?? newfile.txt",
-			path:          "/test/repo",
-			wantIsDirty:   true,
-			wantBranch:    "main",
-			wantFileCount: 1,
-		},
-		{
-			name:          "added files",
-			output:        "A  new.go",
-			path:          "/test/repo",
-			wantIsDirty:   true,
-			wantBranch:    "main",
-			wantFileCount: 1,
-		},
-		{
-			name:          "deleted files",
-			output:        "D  old.go",
-			path:          "/test/repo",
-			wantIsDirty:   true,
-			wantBranch:    "main",
-			wantFileCount: 1,
-		},
-		{
-			name:          "mixed status",
-			output:        "M  modified.txt\nA  added.go\nD  deleted.go\n?? untracked.txt",
-			path:          "/test/repo",
-			wantIsDirty:   true,
-			wantBranch:    "main",
-			wantFileCount: 4,
-		},
-		{
-			name:          "empty output",
-			output:        "   ",
-			path:          "/test/repo",
-			wantIsDirty:   false,
-			wantBranch:    "main",
-			wantFileCount: 0,
-		},
+		{name: "clean", output: "# branch.head main\x00", branch: "main"},
+		{name: "unstaged", output: "# branch.head feature/a\x001 .M N... 100644 100644 100644 a b file one.txt\x00", branch: "feature/a", dirty: true, files: []FileStatus{{Name: "file one.txt", Status: 'M'}}},
+		{name: "rename and newline", output: "# branch.head main\x002 R. N... 100644 100644 100644 a b R100 new\nname\x00old name\x00? untracked.txt\x00", branch: "main", dirty: true, files: []FileStatus{{Name: "new\nname", Status: 'R'}, {Name: "untracked.txt", Status: '?'}}},
+		{name: "detached", output: "# branch.head (detached)\x00", branch: "HEAD"},
+		{name: "conflict", output: "# branch.head main\x00u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00", branch: "main", dirty: true, files: []FileStatus{{Name: "conflict.txt", Status: 'U'}}},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			status, err := parseStatus(context.Background(), tt.output, tt.path)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-
-			if status.IsDirty != tt.wantIsDirty {
-				t.Errorf("IsDirty = %v, want %v", status.IsDirty, tt.wantIsDirty)
-			}
-
-			if len(status.Files) != tt.wantFileCount {
-				t.Errorf("file count = %d, want %d", len(status.Files), tt.wantFileCount)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := parseStatus(test.output)
+			if got.Branch != test.branch || got.IsDirty != test.dirty || !reflect.DeepEqual(got.Files, test.files) {
+				t.Fatalf("got %+v; want branch=%s dirty=%v files=%v", got, test.branch, test.dirty, test.files)
 			}
 		})
 	}

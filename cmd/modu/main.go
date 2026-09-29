@@ -2,16 +2,23 @@ package main
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+	"syscall"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/qimaotech/modu/internal/config"
 	"github.com/qimaotech/modu/internal/engine"
 	"github.com/qimaotech/modu/internal/errors"
+	"github.com/qimaotech/modu/internal/gitproxy"
 	"github.com/qimaotech/modu/internal/i18n"
 	"github.com/qimaotech/modu/internal/logger"
 	"github.com/qimaotech/modu/internal/output"
@@ -47,7 +54,7 @@ func main() {
 		Run: func(cmd *cobra.Command, args []string) {
 			// 无子命令时启动 TUI
 			if len(args) == 0 {
-				if err := ui.StartTUI(configPath); err != nil {
+				if err := ui.StartTUI(cmd.Context(), configPath); err != nil {
 					// 检查是否是配置文件不存在错误
 					if config.IsConfigNotFoundError(err) {
 						fmt.Println(i18n.T("config_not_found"))
@@ -156,6 +163,7 @@ func main() {
 		Run:   runInit,
 	}
 	initCmd.Flags().Bool("scan", false, "自动扫描并添加模块")
+	initCmd.Flags().String("filter", "", "可选克隆过滤器（blob:none，按需下载历史文件）")
 
 	// version 命令
 	versionCmd := &cobra.Command{
@@ -185,7 +193,7 @@ func main() {
 		Use:   "tui",
 		Short: "启动 TUI 界面",
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := ui.StartTUI(configPath); err != nil {
+			if err := ui.StartTUI(cmd.Context(), configPath); err != nil {
 				// 检查是否是配置文件不存在错误
 				if config.IsConfigNotFoundError(err) {
 					fmt.Println(i18n.T("starting_config_wizard"))
@@ -215,7 +223,9 @@ func main() {
 
 	rootCmd.AddCommand(createCmd, deleteCmd, defaultSelectCmd, listCmd, infoCmd, configCmd, initCmd, statusCmd, updateCmd, tuiCmd, versionCmd)
 
-	if err := rootCmd.Execute(); err != nil {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -421,26 +431,15 @@ func runDelete(cmd *cobra.Command, args []string) {
 	eng := loadConfig()
 	formatter := output.New(outputFmt)
 
-	unpushedBranches, err := eng.CheckDeleteUnpushedBranches(cmd.Context(), feature)
-	if err != nil {
-		fmt.Print(formatter.FormatError(errors.Code(err), err.Error(), nil))
-		os.Exit(1)
-	}
-
-	if len(unpushedBranches) > 0 && !allowUnpushedBranches {
-		data := map[string]interface{}{
-			"feature":  feature,
-			"branches": unpushedBranches,
-		}
-		message := fmt.Sprintf("cannot delete feature %s: unpushed branches detected, rerun with --allow-unpushed to confirm deletion", feature)
-		fmt.Print(formatter.FormatError(errors.Code(errors.ErrUnpushedBranch), message, data))
-		os.Exit(1)
-	}
-
-	err = eng.DeleteWorktreeWithOptions(cmd.Context(), feature, force, engine.DeleteOptions{
+	err := eng.DeleteWorktreeWithOptions(cmd.Context(), feature, force, engine.DeleteOptions{
 		AllowUnpushedBranches: allowUnpushedBranches,
 	})
 	if err != nil {
+		var unpushed *engine.UnpushedBranchesError
+		if stderrors.As(err, &unpushed) {
+			fmt.Print(formatter.FormatError(errors.Code(err), "存在未推送分支，请检查后使用 --allow-unpushed 确认删除", map[string]interface{}{"feature": feature, "branches": unpushed.Branches}))
+			exitOperation(cmd.Context())
+		}
 		fmt.Print(formatter.FormatError(errors.Code(err), err.Error(), nil))
 		os.Exit(1)
 	}
@@ -453,17 +452,24 @@ func runList(cmd *cobra.Command, args []string) {
 	formatter := output.New(outputFmt)
 	showStatus, _ := cmd.Flags().GetBool("status")
 	showAll, _ := cmd.Flags().GetBool("all")
+	summary, err := eng.ListWorkspaceSummaries(cmd.Context())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to list worktrees: %v\n", err)
+		exitOperation(cmd.Context())
+	}
 
 	// 如果 -a flag 存在，先显示主项目信息
 	if showAll {
-		main, modules, err := eng.GetMainProjectModules(cmd.Context())
-		if err == nil && main != nil {
-			fmt.Print(formatter.FormatMainProjectResponse(main.Branch, modules))
+		if summary.MainProject != nil {
+			fmt.Print(formatter.FormatMainProjectResponse(summary.MainProject.Branch, summary.Modules))
 			fmt.Println()
 		}
 	}
 
-	envs, err := eng.ListWorktrees(cmd.Context())
+	envs := summary.Envs
+	if err == nil && (showStatus || outputFmt == "json") {
+		envs, err = eng.RefreshWorktreeStatuses(cmd.Context(), envs)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to list worktrees: %v\n", err)
 		os.Exit(1)
@@ -530,15 +536,39 @@ func inferCurrentFeature(cwd, worktreeRoot string) string {
 	return "" // 未找到
 }
 
+// readInitInput 让初始化询问在等待 stdin 时也能响应取消。
+func readInitInput(ctx context.Context, reader io.Reader) (string, error) {
+	inputReady := make(chan string, 1)
+	go func() {
+		var input string
+		_, _ = fmt.Fscanln(reader, &input)
+		inputReady <- input
+	}()
+	select {
+	case input := <-inputReady:
+		return input, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
 func runInit(cmd *cobra.Command, args []string) {
 	shouldScan, _ := cmd.Flags().GetBool("scan")
+	initLog := os.Stdout
+	if outputFmt == "json" {
+		initLog = os.Stderr
+		if _, err := os.Stat(configPath); err != nil {
+			fmt.Print(output.New(outputFmt).FormatError("ERR_CONFIG_NOT_FOUND", err.Error(), nil))
+			os.Exit(1)
+		}
+	}
 
 	// 检查配置文件是否存在
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		// 配置文件不存在，先尝试扫描
 		if shouldScan {
-			fmt.Println(i18n.T("scanning_for_modules"))
-			fmt.Println()
+			fmt.Fprintln(initLog, i18n.T("scanning_for_modules"))
+			fmt.Fprintln(initLog)
 			// 创建默认配置用于扫描
 			cfg := config.DefaultConfig()
 			if err := config.SaveConfig(cfg, configPath); err != nil {
@@ -551,9 +581,9 @@ func runInit(cmd *cobra.Command, args []string) {
 		// 再次检查配置文件是否存在（扫描后可能已创建）
 		if _, err := os.Stat(configPath); os.IsNotExist(err) {
 			// 尝试使用交互式向导
-			if isInteractiveTerminal() {
-				fmt.Println(i18n.T("starting_config_wizard"))
-				fmt.Println()
+			if outputFmt != "json" && isInteractiveTerminal() {
+				fmt.Fprintln(initLog, i18n.T("starting_config_wizard"))
+				fmt.Fprintln(initLog)
 				savedInfo, err := ui.RunConfigWizard()
 				if err != nil {
 					fmt.Fprintln(os.Stderr, err)
@@ -561,14 +591,14 @@ func runInit(cmd *cobra.Command, args []string) {
 				}
 				// 配置向导完成后，显示保存信息
 				if savedInfo != nil {
-					fmt.Println()
-					fmt.Println("\x1b[32m✓\x1b[0m " + i18n.T("config_saved"))
-					fmt.Printf("  %s: %s\n", i18n.T("config_file_at"), savedInfo.ConfigPath)
-					fmt.Printf("  %s: %s\n", i18n.T("workspace"), savedInfo.Workspace)
-					fmt.Printf("  %s: %s\n", i18n.T("worktree"), savedInfo.Worktree)
-					fmt.Printf("  %s: %s\n\n", i18n.T("default_branch"), savedInfo.Base)
-					fmt.Printf("  %s：\n☑️ 1. %s\n☑️ 2. %s", i18n.T("manual_steps"), i18n.T("move_git_projects"), i18n.T("run_config_scan"))
-					fmt.Println()
+					fmt.Fprintln(initLog)
+					fmt.Fprintln(initLog, "\x1b[32m✓\x1b[0m "+i18n.T("config_saved"))
+					fmt.Fprintf(initLog, "  %s: %s\n", i18n.T("config_file_at"), savedInfo.ConfigPath)
+					fmt.Fprintf(initLog, "  %s: %s\n", i18n.T("workspace"), savedInfo.Workspace)
+					fmt.Fprintf(initLog, "  %s: %s\n", i18n.T("worktree"), savedInfo.Worktree)
+					fmt.Fprintf(initLog, "  %s: %s\n\n", i18n.T("default_branch"), savedInfo.Base)
+					fmt.Fprintf(initLog, "  %s：\n☑️ 1. %s\n☑️ 2. %s", i18n.T("manual_steps"), i18n.T("move_git_projects"), i18n.T("run_config_scan"))
+					fmt.Fprintln(initLog)
 				}
 				os.Exit(0)
 			} else {
@@ -578,12 +608,12 @@ func runInit(cmd *cobra.Command, args []string) {
 					fmt.Fprintf(os.Stderr, "%s: %v\n", i18n.T("config_create_failed"), err)
 					os.Exit(1)
 				}
-				fmt.Printf("%s: %s\n", i18n.T("created_default_config"), configPath)
-				fmt.Println()
-				fmt.Println(i18n.T("please_edit_config"))
-				fmt.Printf("  %s\n", i18n.T("add_module_hint"))
-				fmt.Println(i18n.T("or_use_wizard"))
-				fmt.Printf("  %s\n", i18n.T("modu_init"))
+				fmt.Fprintf(initLog, "%s: %s\n", i18n.T("created_default_config"), configPath)
+				fmt.Fprintln(initLog)
+				fmt.Fprintln(initLog, i18n.T("please_edit_config"))
+				fmt.Fprintf(initLog, "  %s\n", i18n.T("add_module_hint"))
+				fmt.Fprintln(initLog, i18n.T("or_use_wizard"))
+				fmt.Fprintf(initLog, "  %s\n", i18n.T("modu_init"))
 				os.Exit(0)
 			}
 		}
@@ -599,28 +629,28 @@ func runInit(cmd *cobra.Command, args []string) {
 	// 如果没有模块且用户指定了 --scan，执行扫描
 	if !shouldScan && len(cfg.Modules) == 0 {
 		// 没有模块，检查是否在交互式环境中
-		if isInteractiveTerminal() {
-			fmt.Println()
-			fmt.Print("未发现任何模块，是否扫描当前目录自动发现模块? [Y/n]: ")
-			var input string
-			if _, err := fmt.Scanln(&input); err != nil {
-				// 读取失败，使用默认值
-				input = ""
+		if outputFmt != "json" && isInteractiveTerminal() {
+			fmt.Fprintln(initLog)
+			fmt.Fprint(initLog, "未发现任何模块，是否扫描当前目录自动发现模块? [Y/n]: ")
+			input, err := readInitInput(cmd.Context(), os.Stdin)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "已取消初始化")
+				exitOperation(cmd.Context())
 			}
 			input = strings.ToLower(strings.TrimSpace(input))
 			if input == "" || input == "y" || input == "yes" {
 				shouldScan = true
 			}
 		} else {
-			fmt.Println()
-			fmt.Println("提示: 当前没有配置模块，如需自动发现模块请运行:")
-			fmt.Printf("  modu init --scan\n")
+			fmt.Fprintln(initLog)
+			fmt.Fprintln(initLog, "提示: 当前没有配置模块，如需自动发现模块请运行:")
+			fmt.Fprintf(initLog, "  modu init --scan\n")
 		}
 	}
 
 	if shouldScan && len(cfg.Modules) == 0 {
-		fmt.Println()
-		fmt.Println("正在扫描目录自动发现模块...")
+		fmt.Fprintln(initLog)
+		fmt.Fprintln(initLog, "正在扫描目录自动发现模块...")
 		runConfigScan(cmd, []string{})
 		// 重新加载配置
 		cfg, err = config.LoadConfigForScan(configPath)
@@ -634,13 +664,20 @@ func runInit(cmd *cobra.Command, args []string) {
 	eng := engine.New(cfg)
 	formatter := output.New(outputFmt)
 
-	err = eng.Init(cmd.Context())
-	if err != nil {
+	filter, _ := cmd.Flags().GetString("filter")
+	display := startProgress("正在初始化")
+	err = eng.InitWithOptions(display.Context(cmd.Context()), gitproxy.CloneOptions{Filter: filter})
+	display.Close()
+	if outputFmt == "json" {
+		fmt.Print(output.FormatOperationResponse("init", "", display.Tracker.Snapshot(), err))
+	} else if err == nil {
+		fmt.Println("✓ 已初始化所有仓库")
+	} else {
 		fmt.Print(formatter.FormatError("ERR_INIT_FAILED", err.Error(), nil))
-		os.Exit(1)
 	}
-
-	fmt.Println("✓ Initialized all repositories")
+	if err != nil {
+		exitOperation(cmd.Context())
+	}
 
 	// 更新主项目的 .gitignore，添加模块目录
 	if cfg.Workspace != "" && len(cfg.Modules) > 0 {
@@ -676,28 +713,50 @@ func runStatus(cmd *cobra.Command, args []string) {
 	fmt.Print(formatter.FormatListResponse(envs, true))
 }
 
+func startProgress(action string) *output.Progress {
+	interactive := outputFmt != "json" && term.IsTerminal(os.Stderr.Fd())
+	width, height, _ := term.GetSize(os.Stderr.Fd())
+	rows := 8
+	if height > 0 && height-4 < rows {
+		rows = max(1, height-4)
+	}
+	return output.NewProgress(action, os.Stderr, interactive, width, rows)
+}
+
+func exitOperation(ctx context.Context) {
+	if ctx.Err() != nil {
+		os.Exit(130)
+	}
+	os.Exit(1)
+}
+
 func runUpdate(cmd *cobra.Command, args []string) {
 	eng := loadConfig()
-
-	if len(args) == 0 {
-		success, failed := eng.UpdateMainProject(cmd.Context())
-		printUpdateResult("", success, failed)
-		if len(failed) > 0 {
-			os.Exit(1)
-		}
-		return
+	feature := ""
+	if len(args) > 0 {
+		feature = args[0]
 	}
-
-	feature := args[0]
-	featurePath := filepath.Join(eng.Config.WorktreeRoot, feature)
-	if _, err := os.Stat(featurePath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "feature %s 不存在: %s\n", feature, featurePath)
-		os.Exit(1)
+	display := startProgress("正在更新")
+	ctx := display.Context(cmd.Context())
+	var success int
+	var failed map[string]error
+	if feature == "" {
+		success, failed = eng.UpdateMainProject(ctx)
+	} else {
+		success, failed = eng.UpdateWorktree(ctx, feature)
 	}
-	success, failed := eng.UpdateWorktree(cmd.Context(), feature)
-	printUpdateResult(feature, success, failed)
+	display.Close()
+	failures := make([]error, 0, len(failed))
+	for name, err := range failed {
+		failures = append(failures, fmt.Errorf("%s: %w", name, err))
+	}
+	if outputFmt == "json" {
+		fmt.Print(output.FormatOperationResponse("update", feature, display.Tracker.Snapshot(), stderrors.Join(failures...)))
+	} else {
+		printUpdateResult(feature, success, failed)
+	}
 	if len(failed) > 0 {
-		os.Exit(1)
+		exitOperation(ctx)
 	}
 }
 
@@ -718,7 +777,11 @@ func printUpdateResult(feature string, success int, failed map[string]error) {
 	for name := range failed {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	fmt.Printf("更新成功: %d 个，失败: %d 个 (%s)\n", success, len(failed), strings.Join(names, ", "))
+	for _, name := range names {
+		fmt.Fprintf(os.Stderr, "  %s: %v\n", name, failed[name])
+	}
 }
 
 // runDefaultSelect 设置默认选中的模块
@@ -824,9 +887,13 @@ func runConfigCreate(cmd *cobra.Command, args []string) {
 
 // runConfigScan 扫描当前目录自动发现模块并更新配置
 func runConfigScan(cmd *cobra.Command, args []string) {
+	scanLog := os.Stdout
+	if outputFmt == "json" {
+		scanLog = os.Stderr
+	}
 	// 检查配置文件是否存在
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		fmt.Printf("配置文件 %s 不存在，请先运行 modu config create\n", configPath)
+		fmt.Fprintf(scanLog, "配置文件 %s 不存在，请先运行 modu config create\n", configPath)
 		os.Exit(1)
 	}
 
@@ -851,7 +918,7 @@ func runConfigScan(cmd *cobra.Command, args []string) {
 	}
 
 	if len(newModules) == 0 {
-		fmt.Println("未发现新的 git 仓库")
+		fmt.Fprintln(scanLog, "未发现新的 git 仓库")
 		return
 	}
 
@@ -891,17 +958,17 @@ func runConfigScan(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	fmt.Printf("✓ %s\n", i18n.Tprintf("scanned_added_modules", addedCount))
-	fmt.Printf("  %s\n", i18n.T("scan_success_hint"))
+	fmt.Fprintf(scanLog, "✓ %s\n", i18n.Tprintf("scanned_added_modules", addedCount))
+	fmt.Fprintf(scanLog, "  %s\n", i18n.T("scan_success_hint"))
 
 	// 检查各模块是否有 base 分支
 	for _, m := range addedModules {
 		modulePath := filepath.Join(currentDir, m.Name)
-		ctx := context.Background()
+		ctx := cmd.Context()
 		cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", cfg.DefaultBase)
 		cmd.Dir = modulePath
 		if err := cmd.Run(); err != nil {
-			fmt.Printf("  %s\n", i18n.Tprintf("module_branch_missing", m.Name, cfg.DefaultBase))
+			fmt.Fprintf(scanLog, "  %s\n", i18n.Tprintf("module_branch_missing", m.Name, cfg.DefaultBase))
 		}
 	}
 }

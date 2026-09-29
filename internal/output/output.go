@@ -188,6 +188,9 @@ func (f *Formatter) FormatListResponse(envs []core.WorktreeEnv, showStatus bool)
 				if mod.IsDirty {
 					status = "dirty"
 				}
+				if mod.Error != nil {
+					status = "unknown: " + mod.Error.Error()
+				}
 				statusStr = fmt.Sprintf(" (%s)", status)
 			}
 			sb.WriteString(fmt.Sprintf("    - %s: %s%s\n", mod.Name, mod.Branch, statusStr))
@@ -251,6 +254,9 @@ func (f *Formatter) FormatInfoResponse(env *core.WorktreeEnv) string {
 		status := "✅ clean"
 		if mod.IsDirty {
 			status = "🔴 dirty"
+		}
+		if mod.Error != nil {
+			status = "⚠ unknown: " + mod.Error.Error()
 		}
 		prefix := "├─"
 		indent := "│   "

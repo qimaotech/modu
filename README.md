@@ -121,6 +121,7 @@ TUI 启动时会检测 `app` 是否已安装；未安装的工具不会出现在
 # 初始化所有仓库
 modu init
 modu init --scan  # 自动扫描并添加模块
+modu init --filter blob:none  # 可选：历史文件内容按需下载，保留完整提交历史
 
 # 创建 feature 分支
 modu create my-feature
@@ -130,7 +131,7 @@ modu create my-feature --modules frontend,backend  # 只创建指定模块
 
 # 列出所有 worktree
 modu list
-modu list -v  # 显示详细信息（模块、分支、状态）
+modu list --status  # 额外检查并显示 clean/dirty 状态
 modu list -a  # 显示主项目 (workspace) 及其模块的分支信息
 
 # 查看详情
@@ -171,6 +172,20 @@ modu config scan --module "backend=..."       # 扫描并添加模块
 modu version
 ```
 
+### 大型工作区与进度反馈
+
+`init` 和 `update` 会立即显示进度，包含仓库名称、当前阶段、耗时和完成数量。终端中每 100ms 刷新一次，Git 的接收对象等传输进度会实时显示。百分比属于当前 Git 阶段，不代表整个命令的完成比例。
+
+进度写入 stderr；重定向输出或在 CI 中运行时，只记录阶段变化及结果。`modu init -o json`、`modu update -o json` 的仓库操作结果写入 stdout，包含各仓库的状态、耗时和错误。
+
+Ctrl+C 取消当前操作，并停止启动排队中的仓库任务。CLI 取消时退出码为 130；已经完成的更新会保留，Git 在 rebase 期间中断后可能需要按提示解决冲突或执行 `git rebase --abort`。克隆先写入临时目录，失败或取消会清理本次未完成的克隆，重试不会把残留目录当成成功。
+
+默认 `list`（包括 `-a`）只读取 worktree 元数据，不扫描文件；`--status`、`status`、JSON 列表和 `info` 按需查询状态，并限制并发数。TUI 先显示列表，再在后台补齐状态，更新后只刷新受影响的环境。
+
+`update` 只拉取后续操作需要的 `origin`，避免访问无关 remote；删除前的未推送检查仍保留其他 upstream 的检查能力。并发数由 `concurrency` 控制，默认 5，建议结合网络和磁盘负载调整。
+
+`init --filter blob:none` 适合历史大文件较多的仓库，需要服务端支持 partial clone。默认仍完整克隆；该选项只影响新克隆，已有仓库不转换。旧版本文件内容在首次访问时下载，离线使用历史文件前需先取回相应内容。
+
 ### TUI 快捷键
 
 | 按键   | 说明                            |
@@ -185,9 +200,12 @@ modu version
 | x      | 用 Codex 打开主项目             |
 | z      | 用配置的 Zed 打开主项目（示例） |
 | u      | 更新代码                         |
+| r      | 重新加载列表和状态              |
 | q/esc  | 退出 TUI                       |
 
 配置化 App opener 只在对应 App 已安装时显示；快捷键冲突时可通过操作菜单选中后按 Enter 执行。
+
+操作进行中，Ctrl+C、Esc 或 q 会取消操作并等待 Git 结束，再返回列表；远端查询、更新和删除不会阻塞键盘响应。
 
 ```bash
 # 创建配置文件
