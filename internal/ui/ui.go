@@ -1116,7 +1116,11 @@ func (m *App) renderList() string {
 		if m.statusesPending {
 			status = "检查中"
 		}
-		line := fmt.Sprintf("→ %s [主项目] (%s) [%s]", m.mainProject.Name, status, m.mainProject.Branch)
+		prefix := "  "
+		if m.selected == 0 {
+			prefix = "→ "
+		}
+		line := fmt.Sprintf("%s%s [主项目] (%s) [%s]", prefix, m.mainProject.Name, status, m.mainProject.Branch)
 		if m.selected == 0 {
 			s.WriteString(selectedItemStyle.Render(line))
 		} else {

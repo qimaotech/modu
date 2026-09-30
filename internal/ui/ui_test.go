@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/qimaotech/modu/internal/config"
 	"github.com/qimaotech/modu/internal/core"
@@ -462,6 +463,41 @@ func TestApp_View_List_WithMainAndEnvs(t *testing.T) {
 	}
 	if !strings.Contains(view, "main") || !strings.Contains(view, "feat-a") {
 		t.Errorf("renderList() 应包含 main 和 feat-a: %s", view)
+	}
+}
+
+func TestApp_View_List_SelectionMarkerFollowsCursor(t *testing.T) {
+	app := &App{
+		state:       "list",
+		mainProject: &engine.MainProjectStatus{Name: "main", Branch: "main"},
+		Envs:        []core.WorktreeEnv{{Name: "feat-a"}, {Name: "feat-b"}},
+	}
+	steps := []struct {
+		name         string
+		key          tea.KeyType
+		selectedName string
+	}{
+		{name: "InitialMainProject", selectedName: "main"},
+		{name: "MoveToFirstFeature", key: tea.KeyDown, selectedName: "feat-a"},
+		{name: "MoveToSecondFeature", key: tea.KeyDown, selectedName: "feat-b"},
+		{name: "StayOnLastFeature", key: tea.KeyDown, selectedName: "feat-b"},
+		{name: "ReturnToFirstFeature", key: tea.KeyUp, selectedName: "feat-a"},
+		{name: "ReturnToMainProject", key: tea.KeyUp, selectedName: "main"},
+		{name: "StayOnMainProject", key: tea.KeyUp, selectedName: "main"},
+	}
+	for stepIndex, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			if stepIndex > 0 {
+				app.Update(tea.KeyMsg{Type: step.key})
+			}
+			view := ansi.Strip(app.View())
+			if markerCount := strings.Count(view, "→ "); markerCount != 1 {
+				t.Errorf("列表应只显示一个选中箭头，实际为 %d:\n%s", markerCount, view)
+			}
+			if !strings.Contains(view, "\n→ "+step.selectedName+" ") {
+				t.Errorf("选中箭头应位于 %s 行:\n%s", step.selectedName, view)
+			}
+		})
 	}
 }
 
